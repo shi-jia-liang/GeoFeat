@@ -1,0 +1,31 @@
+# editor settings
+.idea
+.vscode
+
+# datasets file
+datasets/
+
+# logs file
+logs/
+
+# weights file
+weights/*
+
+# onnx models
+*.onnx
+
+# python cache
+__pycache__/
+*.pyc
+
+# results file
+results/
+
+# LiftFeat code
+./LiftFeat
+
+# old versions
+old/
+
+# tools file
+tools/

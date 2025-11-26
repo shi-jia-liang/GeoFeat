@@ -1,0 +1,26 @@
+
+{
+	"data": {
+		"dataset_info": {
+			"megadepth": {
+				"description": "MegaDepth dataset for 3D geometry-aware feature matching",
+				"root_structure": {
+					"megadepth_indices_new": "Metadata indices for dataset scenes",
+					"MegaDepth_v1": "Raw image and depth data",
+					"scene_info_0.1_0.7": "NPZ files containing camera poses and depth maps"
+				}
+			},
+			"coco": {
+				"description": "COCO20k dataset for photometric augmentation training",
+				"usage": "Optional, requires COCOAugmentor setup"
+			}
+		},
+		"megadepth_root_path": "D:/DataSets/MegaDepth",
+		"coco_root_path": "./datasets/coco_20k",
+		"megadepth_batch_size": 4,
+		"coco_batch_size": 4,
+		"num_workers": 10,
+		"use_megadepth": true,
+		"use_coco": false
+	}
+}
