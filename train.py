@@ -125,7 +125,7 @@ class Trainer():
 	            n_steps=30_000,
 				save_ckpt_every=1000,
 				lr=3e-4, gamma_steplr=0.5,
-	            training_res=(800, 608), device_num="cuda:0",
+	            training_res=(800, 600), device_num="cuda:0",
 	            use_coord_loss=False,
 				dry_run=False,
 				log_interval=1000,
@@ -175,7 +175,8 @@ class Trainer():
 		# )
 
 		# depth-anything model  # 深度估计提取器
-		self.depth_net = DepthAnythingExtractor('vits', self.dev, 256)
+		# self.depth_net = DepthAnythingExtractor('vits', self.dev, 256)
+		self.depth_net = self.net.geometric_extractor.depth_extractor
 
 		# alike model   # 高效的高精度局部特征提取模型
 		self.alike_net = ALikeExtractor('alike-t', self.dev)
@@ -403,8 +404,9 @@ class Trainer():
 					coordinates.append(coordinate)
 					
 					# 增强特征提取(forward2)(融合了描述子和法向量)
-					fb_feat1 = self.net.forward2(feats1[b].unsqueeze(0), kpts1[b].unsqueeze(0), normals1[b].unsqueeze(0))
-					fb_feat2 = self.net.forward2(feats2[b].unsqueeze(0), kpts2[b].unsqueeze(0), normals2[b].unsqueeze(0))
+					# Pass only normals (channels 1-3) to forward2, skipping depth (channel 0)
+					fb_feat1 = self.net.forward2(feats1[b].unsqueeze(0), kpts1[b].unsqueeze(0), normals1[b, 1:4].unsqueeze(0))
+					fb_feat2 = self.net.forward2(feats2[b].unsqueeze(0), kpts2[b].unsqueeze(0), normals2[b, 1:4].unsqueeze(0))
 					# 增强描述子匹配(融合了描述子和法向量)
 					fb_coordinate = self.net.fine_matcher(torch.cat([fb_feat1, fb_feat2], dim=-1))
 					fb_coordinates.append(fb_coordinate)
@@ -558,11 +560,11 @@ if __name__ == '__main__':
 	trainer = Trainer(
 		# Configuration files
 		data_config=data_config,
-	model_config=model_config,
+		model_config=model_config,
 
-	# Training parameters from CLI args
-	model_name='GeoFeat',
-	ckpt_save_path=args.ckpt_save_path,
+		# Training parameters from CLI args
+		model_name=args.name,
+		ckpt_save_path=args.ckpt_save_path,
 		n_steps=args.n_steps,
 		save_ckpt_every=args.save_ckpt_every,
 		lr=args.lr,

@@ -29,3 +29,5 @@ old/
 
 # tools file
 tools/
+
+./3rdparty/Depth-Anything-V2

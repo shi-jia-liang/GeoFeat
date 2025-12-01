@@ -21,6 +21,12 @@
 			"window_size": 5,
 			"ffn_type": "swigluFFN"
 		},
+		"geometric_features": {
+			"depth": false,
+			"normal": true,
+			"gradients": true,
+			"curvatures": true
+		},
 		"_last_activation_options": ["None","relu","sigmoid","tanh"],
 		"last_activation": "None",
 		"_l2_normalization_options": [true, false],
