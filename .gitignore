@@ -4,6 +4,7 @@
 
 # datasets file
 datasets/
+data/
 
 # logs file
 logs/
@@ -22,7 +23,7 @@ __pycache__/
 results/
 
 # LiftFeat code
-./LiftFeat
+LiftFeat/
 
 # old versions
 old/
@@ -30,4 +31,4 @@ old/
 # tools file
 tools/
 
-./3rdparty/Depth-Anything-V2
+3rdparty/Depth-Anything-V2/

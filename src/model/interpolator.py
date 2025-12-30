@@ -1,5 +1,5 @@
 """
-	"LiftFeat: 3D Geometry-Aware Local Feature Matching"
+	"   : 3D Geometry-Aware Local Feature Matching"
  
     This script is used to interpolate rough descriptors from LiftFeat
 """

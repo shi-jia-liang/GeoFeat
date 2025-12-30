@@ -53,10 +53,14 @@ class CurvatureComputer(nn.Module):
         Returns:
             dict containing geometric features
         """
-        B, C, H, W = depth.shape
+        # We expect the input depth to be already normalized (e.g. [0, 1]) if needed.
+        # The caller (e.g. loss function) is responsible for normalization.
+        depth_norm = depth
+
+        B, C, H, W = depth_norm.shape
         
         # 1. Compute derivatives
-        grad_x, grad_y, grad_xx, grad_yy, grad_xy = self.compute_gradients(depth)
+        grad_x, grad_y, grad_xx, grad_yy, grad_xy = self.compute_gradients(depth_norm)
         
         # Compute Normal Vector
         # Surface normal n = (-dz/dx, -dz/dy, 1) normalized
@@ -104,9 +108,12 @@ class GeometricExtractor(nn.Module):
     """
     def __init__(self, model_config):
         super().__init__()
-        self.model_config = model_config
+        # expect explicit geometric_features flags; no defaults
+        if 'geometric_features' not in model_config:
+            raise KeyError("model_config must contain 'geometric_features'")
+        self.geo_cfg = model_config['geometric_features']
         self.curvature_computer = CurvatureComputer()
-        
+
         # Initialize DepthAnythingExtractor
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.depth_extractor = DepthAnythingExtractor('vits', self.device, 256)
@@ -166,20 +173,20 @@ class GeometricExtractor(nn.Module):
         geo_features = {}
         
         # 0-order
-        if self.model_config.get('depth', True):
+        if self.geo_cfg['depth']:
             geo_features['depth'] = depth
-            
+
         # 1-order
-        if self.model_config.get('normal', True):
+        if self.geo_cfg['normal']:
             geo_features['normal'] = curvature_dict['normal']
-            
+
         # Gradients
-        if self.model_config.get('gradients', True):
+        if self.geo_cfg['gradients']:
             geo_features['grad_x'] = curvature_dict['grad_x']
             geo_features['grad_y'] = curvature_dict['grad_y']
-            
+
         # Curvatures
-        if self.model_config.get('curvatures', True):
+        if self.geo_cfg['curvatures']:
             geo_features['k1'] = curvature_dict['k1']
             geo_features['k2'] = curvature_dict['k2']
             geo_features['gaussian_curv'] = curvature_dict['gaussian_curv']
@@ -194,21 +201,23 @@ class GeometricAttentionFusion(nn.Module):
     """
     def __init__(self, model_config, feature_dim=64):
         super().__init__()
-        self.model_config = model_config
-        
-        # Calculate input dimension based on config
+        if 'geometric_features' not in model_config:
+            raise KeyError("model_config must contain 'geometric_features'")
+        self.model_config = model_config['geometric_features']
+
+        # Calculate input dimension based on config (no defaults)
         geo_input_dim = 0
         # 0-order
-        if self.model_config.get('depth', True): 
+        if self.model_config['depth']:
             geo_input_dim += 1
         # 1-order
-        if self.model_config.get('normal', True): 
+        if self.model_config['normal']:
             geo_input_dim += 3
         # Gradients
-        if self.model_config.get('gradients', True): 
+        if self.model_config['gradients']:
             geo_input_dim += 2 # grad_x, grad_y
         # Curvatures
-        if self.model_config.get('curvatures', True): 
+        if self.model_config['curvatures']:
             geo_input_dim += 5 # k1, k2, K, H, SI
             
         if geo_input_dim == 0:

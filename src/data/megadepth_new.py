@@ -34,7 +34,7 @@ class MegaDepthCleanedDataset(Dataset):
 		min_overlap_score: float = 0.3,
 		max_overlap_score: float = 1.0,
 		load_depth: bool = True,
-		img_resize = (800, 608),
+		img_resize = (800, 600),
 		df: int = 32,
 		img_padding: bool = False,
 		depth_padding: bool = True,
