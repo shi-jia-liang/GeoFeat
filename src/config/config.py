@@ -26,11 +26,11 @@ cfg.MODEL.UPSAMPLE_TYPE = "bilinear"
 # Positional Encoding options: "None", "fourier","rot_inv"
 cfg.MODEL.POS_ENC_TYPE = "None"
 
-cfg.MODEL.KEYPOINT_ENCODER = [128, 64, 64]
 cfg.MODEL.KEYPOINT_DIM = 65
+cfg.MODEL.KEYPOINT_ENCODER = [128, 64, 64]
 
-cfg.MODEL.DESCRIPTOR_ENCODER = [64, 64]
 cfg.MODEL.DESCRIPTOR_DIM = 64
+cfg.MODEL.DESCRIPTOR_ENCODER = [64, 64]
 
 # Normal, Gradient, and Curvature feature encoders
 cfg.MODEL.GEOMETRIC_FEATURES = CN()
@@ -40,6 +40,7 @@ cfg.MODEL.GEOMETRIC_FEATURES.GRADIENTS = False
 cfg.MODEL.GEOMETRIC_FEATURES.CURVATURES = False
 
 cfg.MODEL.DEPTH_ENCODER = [128, 64, 64]
+cfg.MODEL.DEPTH_DIM = 64
 
 
 cfg.MODEL.NORMAL_ENCODER = [128, 64, 64]
@@ -63,7 +64,11 @@ cfg.MODEL.SWIN.WINDOW_SIZE = 5
 cfg.MODEL.ATTENTION = CN()
 cfg.MODEL.ATTENTIONAL_LAYERS = 3
 cfg.MODEL.ATTENTION.TYPE = "AFT"     # "AFT" 或 "Swin"
+
+cfg.MODEL.ATTENTION.AFT = CN()
 cfg.MODEL.ATTENTION.AFT.FFN_TYPE = "positionwiseFFN" 	# 当 TYPE="AFT" 时可选 "positionwiseFFN"(PPN) 或 "Swin"
+
+cfg.MODEL.ATTENTION.SWIN = CN()
 cfg.MODEL.ATTENTION.SWIN.FFN_TYPE = "SwinFFN" 			# 当 TYPE="Swin" 时强制 "Swin"
 
 

@@ -214,24 +214,47 @@ if __name__ == "__main__":
     # Load model config from the same yacs config used in training
     cfg = get_cfg_defaults()
 
-    def _cfg_to_dict(node):
-        if hasattr(node, "to_dict"):
-            return node.to_dict()
-        if isinstance(node, dict):
-            return {k: _cfg_to_dict(v) for k, v in node.items()}
-        try:
-            return dict(node)
-        except Exception:
-            return node
+    model_config = {
+        'backbone': cfg.MODEL.BACKBONE,
+        'upsample_type': cfg.MODEL.UPSAMPLE_TYPE,
+        'pos_enc_type': cfg.MODEL.POS_ENC_TYPE,
+        'keypoint_encoder': list(cfg.MODEL.KEYPOINT_ENCODER),
+        'keypoint_dim': int(cfg.MODEL.KEYPOINT_DIM),
+        'descriptor_encoder': list(cfg.MODEL.DESCRIPTOR_ENCODER),
+        'descriptor_dim': int(cfg.MODEL.DESCRIPTOR_DIM),
+        'geometric_features': {
+            'depth': bool(cfg.MODEL.GEOMETRIC_FEATURES.DEPTH),
+            'normal': bool(cfg.MODEL.GEOMETRIC_FEATURES.NORMAL),
+            'gradients': bool(cfg.MODEL.GEOMETRIC_FEATURES.GRADIENTS),
+            'curvatures': bool(cfg.MODEL.GEOMETRIC_FEATURES.CURVATURES),
+        },
+        'depth_encoder': list(cfg.MODEL.DEPTH_ENCODER),
+        'depth_dim': int(cfg.MODEL.DEPTH_DIM),
+        'normal_encoder': list(cfg.MODEL.NORMAL_ENCODER),
+        'normal_dim': int(cfg.MODEL.NORMAL_DIM),
+        'gradient_encoder': list(cfg.MODEL.GRADIENT_ENCODER),
+        'gradient_dim': int(cfg.MODEL.GRADIENT_DIM),
+        'curvature_encoder': list(cfg.MODEL.CURVATURE_ENCODER),
+        'curvature_dim': int(cfg.MODEL.CURVATURE_DIM),
+        'Swin': {
+            'input_resolution': list(cfg.MODEL.SWIN.INPUT_RESOLUTION),
+            'depth_per_layer': int(cfg.MODEL.SWIN.DEPTH_PER_LAYER),
+            'num_heads': int(cfg.MODEL.SWIN.NUM_HEADS),
+            'window_size': int(cfg.MODEL.SWIN.WINDOW_SIZE),
+            'ffn_type': cfg.MODEL.ATTENTION.SWIN.FFN_TYPE,
+        },
+        'attention_layers': int(cfg.MODEL.ATTENTIONAL_LAYERS),
+        'attention_type': cfg.MODEL.ATTENTION.TYPE,
+        'AFT': {
+            'ffn_type': cfg.MODEL.ATTENTION.AFT.FFN_TYPE,
+        },
+        'last_activation': cfg.MODEL.LAST_ACTIVATION,
+        'l2_normalization': bool(cfg.MODEL.L2_NORMALIZATION),
+        'use_coord_loss': bool(cfg.MODEL.USE_COORD_LOSS),
+        'output_dim': int(cfg.MODEL.OUTPUT_DIM),
+    }
 
-    def _lower_keys(obj):
-        if isinstance(obj, dict):
-            return {str(k).lower(): _lower_keys(v) for k, v in obj.items()}
-        return obj
-
-    model_config = _lower_keys(_cfg_to_dict(cfg.MODEL))
-
-    weights = os.path.join(os.path.dirname(__file__), "../weights/GeoFeat_20251230_202011/GeoFeat_step5000.pth")
+    weights = os.path.join(os.path.dirname(__file__), "../weights/GeoFeat_20260101_182828/GeoFeat_step2000.pth")
     model = GeoFeat(model_config=model_config, weight_path=weights)
 
     errors = benchmark_features(model.match_featnet)

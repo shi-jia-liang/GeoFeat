@@ -494,7 +494,7 @@ class GeoHead(nn.Module):
 		self.bnDepa = nn.BatchNorm2d(in_channels//2)
 		self.convDepb = nn.Conv2d(in_channels//4+in_channels//2, in_channels//4, kernel_size=3, stride=1, padding=1)
 		self.bnDepb = nn.BatchNorm2d(in_channels//4)
-		self.convDepc = nn.Conv2d(in_channels//8+in_channels//4, 3, kernel_size=3, stride=1, padding=1)
+		self.convDepc = nn.Conv2d(in_channels//8+in_channels//4, self.out_channels, kernel_size=3, stride=1, padding=1)
 		self.bnDepc = nn.BatchNorm2d(self.out_channels)
 		self.leaky_relu = nn.LeakyReLU(0.1)
 
@@ -803,9 +803,12 @@ class AFTBlock(nn.Module):
 		if self.ffn_type in ("pffn", "positionwiseffn"):
 			self.ffn = FeedForwardNetwork(feature_dim, ffn_type='positionwiseFFN', dropout=dropout, p=p)
 			self.needs_shape = False
+		elif self.ffn_type == "swigluffn":
+			self.ffn = FeedForwardNetwork(feature_dim, ffn_type='swigluFFN', dropout=dropout, p=p)
+			self.needs_shape = False
 		elif self.ffn_type == "swin":
 			if swin_cfg is None or not swin_cfg["input_resolution"]:
-				raise ValueError("Swin FFN requires Swin config with input_resolution")
+				raise ValueError("Swin FFN requires Swin model_config with input_resolution")
 			self.ffn = SwinAttentionalLayer(
 				feature_dim,
 				input_resolution=tuple(swin_cfg["input_resolution"]),
@@ -833,37 +836,38 @@ class AFTBlock(nn.Module):
 # ---------------- Update AttentionalNN to support Swin ----------------
 # You can replace your existing AttentionalNN with the extended one below (keeps AFT support)
 
-if cfg["attention_type"] == "AFT":
-			self.attn = AFTAttention(feature_dim, dropout=dropout, p=p)
-			if cfg["ffn_type"] == "PPN"
-				self.ffn = PositionwiseFeedForward(feature_dim, dropout=dropout, p=p)
-			elif cfg["ffn_type"] == "swigluFFN":
-				self.ffn = swigluFeedForward(feature_dim, dropout=dropout, p=p)
-		elif cfg["attention_type"] == "Swin":
-			self.attn = SwinAttention(feature_dim, dropout=dropout, p=p)
-			self.ffn = SwinFeedForward(feature_dim, dropout=dropout, p=p)
+# if cfg["attention_type"] == "AFT":
+# 			self.attn = AFTAttention(feature_dim, dropout=dropout, p=p)
+# 			if cfg["ffn_type"] == "PPN"
+# 				self.ffn = PositionwiseFeedForward(feature_dim, dropout=dropout, p=p)
+# 			elif cfg["ffn_type"] == "swigluFFN":
+# 				self.ffn = swigluFeedForward(feature_dim, dropout=dropout, p=p)
+# 		elif cfg["attention_type"] == "Swin":
+# 			self.attn = SwinAttention(feature_dim, dropout=dropout, p=p)
+# 			self.ffn = SwinFeedForward(feature_dim, dropout=dropout, p=p)
 
 class AttentionalNN(nn.Module):
-	def __init__(self, feature_dim: int, layer_num: int, config: dict, dropout: bool = False, p: float = 0.1) -> None:
+	def __init__(self, feature_dim: int, layer_num: int, model_config: dict, dropout: bool = False, p: float = 0.1) -> None:
 		super().__init__()
-		self.config = config
-		self.attention_type = config["attention_type"]  # 'AFT' or 'Swin'
+		self.model_config = model_config
+		self.attention_type = model_config["attention_type"]  # 'AFT' or 'Swin'
 		self.layers = nn.ModuleList()
 		if self.attention_type == 'AFT':
-			aft_cfg = config["AFT"]
+			aft_cfg = model_config["AFT"]
 			ffn_type = aft_cfg["ffn_type"]
-			swin_cfg = config["Swin"]
+			swin_cfg = model_config["Swin"]
 			for _ in range(layer_num):
 				self.layers.append(AFTBlock(feature_dim, ffn_type=ffn_type, swin_cfg=swin_cfg, dropout=dropout, p=p))
+		
 		elif self.attention_type == 'Swin':
 			# need to know spatial resolution and block depth / heads / window size
-			input_resolution = config["Swin"]["input_resolution"]  # (H, W)
+			input_resolution = model_config["Swin"]["input_resolution"]  # (H, W)
 			if input_resolution is None:
-				raise ValueError("For Swin attention, provide config['Swin']['input_resolution'] = (H, W)")
-			depth_per_layer = config["Swin"]["depth_per_layer"]
-			num_heads = config["Swin"]["num_heads"]
-			window_size = config["Swin"]["window_size"]
-			ffn_type = config["Swin"]["ffn_type"] # 'positionwiseFFN' or 'swigluFFN'
+				raise ValueError("For Swin attention, provide model_config['Swin']['input_resolution'] = (H, W)")
+			depth_per_layer = model_config["Swin"]["depth_per_layer"]
+			num_heads = model_config["Swin"]["num_heads"]
+			window_size = model_config["Swin"]["window_size"]
+			ffn_type = model_config["Swin"]["ffn_type"]
 			for _ in range(layer_num):
 				self.layers.append(SwinAttentionalLayer(feature_dim, input_resolution=input_resolution, depth=depth_per_layer, num_heads=num_heads, window_size=window_size, ffn_type=ffn_type, dropout=dropout, p=p))
 		else:
@@ -889,116 +893,94 @@ class AttentionalNN(nn.Module):
 		else:
 			raise ValueError(f"Unknown attention type: {self.attention_type}")
 
-
 class FeatureBooster(nn.Module):
-	def __init__(self, config, dropout=False, p=0.1, use_depth=True, use_normal=True, use_gradients=True, use_curvature=True, use_cross=True):
+	def __init__(self, model_config, dropout=False, p=0.1):
 		super().__init__()
-		self.config = config
-
-		# Flags for geometric features
-		self.use_depth = use_depth
-		self.use_normal = use_normal
-		self.use_gradients = use_gradients
-		self.use_curvature = use_curvature
-		self.use_cross = use_cross
-		
-		# Use ModuleDict for geometric encoders
-		self.geo_encoders = nn.ModuleDict()
-
-		self.kenc = KeypointEncoder(self.config['keypoint_dim'], self.config['descriptor_dim'], self.config['keypoint_encoder'], dropout=dropout)
-
-		self.denc = DescriptorEncoder(self.config['descriptor_dim'], self.config['descriptor_encoder'], dropout=dropout)
-
-		if use_normal:
-			self.geo_encoders['normal'] = GeometricEncoder(self.config['normal_dim'], self.config['descriptor_dim'], self.config['normal_encoder'], dropout=dropout)
-
-		if use_depth:
-			self.geo_encoders['depth'] = GeometricEncoder(self.config['depth_dim'], self.config['descriptor_dim'], self.config['depth_encoder'], dropout=dropout)
-
-		if use_gradients:
-			self.geo_encoders['gradients'] = GeometricEncoder(self.config['gradient_dim'], self.config['descriptor_dim'], self.config['gradient_encoder'], dropout=dropout)
-
-		if use_curvature:
-			self.geo_encoders['curvatures'] = GeometricEncoder(self.config['curvature_dim'], self.config['descriptor_dim'], self.config['curvature_encoder'], dropout=dropout)
-
-		if use_cross:
-			self.attn_proj = AttentionalNN(feature_dim=self.config['descriptor_dim'], layer_num=self.config['attention_layers'], config=self.config, dropout=dropout)
-		else:
-			self.attn_proj = None
-
+		self.model_config = model_config
 		self.use_dropout = dropout
 		self.dropout = nn.Dropout(p=p)
 
-		# self.layer_norm = nn.LayerNorm(self.config['descriptor_dim'], eps=1e-6)
+		self.kenc = KeypointEncoder(self.model_config['keypoint_dim'], self.model_config['descriptor_dim'], self.model_config['keypoint_encoder'], dropout=dropout)
+		self.denc = DescriptorEncoder(self.model_config['descriptor_dim'], self.model_config['descriptor_encoder'], dropout=dropout)
 
-		if self.config['last_activation'] == 'None':
+		# Geometric features setup
+		self.geo_encoders = nn.ModuleDict()
+		self.geo_specs = [] # List of (name, dim)
+		
+		geo_cfg = self.model_config['geometric_features']
+		# Order must match GeoHead: depth -> normal -> gradients -> curvatures
+		# Mapping from config key to (encoder_name, dim_key, encoder_cfg_key)
+		features_map = [
+			('depth', 'depth', 'depth_dim', 'depth_encoder'),
+			('normal', 'normal', 'normal_dim', 'normal_encoder'),
+			('gradients', 'gradients', 'gradient_dim', 'gradient_encoder'),
+			('curvatures', 'curvatures', 'curvature_dim', 'curvature_encoder')
+		]
+
+		for cfg_key, name, dim_key, enc_key in features_map:
+			if geo_cfg[cfg_key]:
+				dim = self.model_config[dim_key]
+				self.geo_encoders[name] = GeometricEncoder(
+					dim, 
+					self.model_config['descriptor_dim'], 
+					self.model_config[enc_key], 
+					dropout=dropout
+				)
+				self.geo_specs.append((name, dim))
+
+		self.attn_proj = AttentionalNN(feature_dim=self.model_config['descriptor_dim'], layer_num=self.model_config['attention_layers'], model_config=self.model_config, dropout=dropout)
+
+		# Final activation
+		if self.model_config['last_activation'] == 'None':
 			self.last_activation = None
-		elif self.config['last_activation'] == 'relu':
+		elif self.model_config['last_activation'] == 'relu':
 			self.last_activation = nn.ReLU()
-		elif self.config['last_activation'] == 'sigmoid':
+		elif self.model_config['last_activation'] == 'sigmoid':
 			self.last_activation = nn.Sigmoid()
-		elif self.config['last_activation'] == 'tanh':
+		elif self.model_config['last_activation'] == 'tanh':
 			self.last_activation = nn.Tanh()
 		else:
-			raise Exception('Not supported activation "%s".' % self.config['last_activation'])
+			raise Exception('Not supported activation "%s".' % self.model_config['last_activation'])
 
-	def forward(self, desc, kpts, normals=None, depth=None, gradients=None, curvature=None, shape=None):
-		# import pdb;pdb.set_trace()
-		## Self boosting
-		# Descriptor MLP encoder
-		desc = self.denc(desc)
-		# Geometric MLP encoder
-		desc = desc + self.kenc(kpts)
+	def forward(self, desc, kpts, geo_v=None, shape=None):
+		# Descriptor & Keypoint encoding
+		desc = self.denc(desc) + self.kenc(kpts)
 		if self.use_dropout:
 			desc = self.dropout(desc)
 
 		# Unified Geometric Features Fusion
-		if normals is not None and 'normal' in self.geo_encoders:
-			desc = desc + self.geo_encoders['normal'](normals)
-			if self.use_dropout:
-				desc = self.dropout(desc)
-
-		if depth is not None and 'depth' in self.geo_encoders:
-			desc = desc + self.geo_encoders['depth'](depth)
-			if self.use_dropout:
-				desc = self.dropout(desc)
-
-		if gradients is not None and 'gradients' in self.geo_encoders:
-			desc = desc + self.geo_encoders['gradients'](gradients)
-			if self.use_dropout:
-				desc = self.dropout(desc)
-
-		if curvature is not None and 'curvatures' in self.geo_encoders:
-			desc = desc + self.geo_encoders['curvatures'](curvature)
-			if self.use_dropout:
-				desc = self.dropout(desc)
+		if geo_v is not None and self.geo_specs:
+			start_idx = 0
+			for name, dim in self.geo_specs:
+				# Slice the corresponding feature vector
+				feat_v = geo_v[:, start_idx : start_idx + dim]
+				# Encode and add
+				desc = desc + self.geo_encoders[name](feat_v)
+				if self.use_dropout:
+					desc = self.dropout(desc)
+				start_idx += dim
 
 		## Cross boosting
-		if self.attn_proj is not None:
-			desc = self.attn_proj(desc, shape=shape)
+		desc = self.attn_proj(desc, shape=shape)
 
-		## Post processing
 		# Final MLP projection
-		# desc = self.final_proj(desc)
 		if self.last_activation is not None:
 			desc = self.last_activation(desc)
 		# L2 normalization
-		if self.config['l2_normalization']:
+		if self.model_config['l2_normalization']:
 			desc = F.normalize(desc, dim=-1)
 
 		return desc
-
-################################### fixed #######################################
-
+	
 class GeoFeatModel(nn.Module):
 	def __init__(self, model_config):
 		super().__init__()
 		self.device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-		self.config = model_config
-		self.geo_config = self.config['geometric_features']
+		self.model_config = model_config
+		self.geo_config = self.model_config['geometric_features']
 
 		# backbone
-		self.backbone = self.config['backbone']
+		self.backbone = self.model_config['backbone']
 		c1,c2,c3,c4,c5 = 24,24,64,64,128
 		if self.backbone == "Standard":
 			self.feature_extract = StandardBackbone(c1, c2, c3, c4, c5)
@@ -1009,20 +991,20 @@ class GeoFeatModel(nn.Module):
 		self.norm = nn.InstanceNorm2d(1)
 		
 		# feature upsample and fusion
-		if self.config['upsample_type'] == 'bilinear':
+		if self.model_config['upsample_type'] == 'bilinear':
 			self.upsample4 = UpsampleLayer(c4)
 			self.upsample5 = UpsampleLayer(c5)
-		elif self.config['upsample_type'] == 'pixelshuffle':
+		elif self.model_config['upsample_type'] == 'pixelshuffle':
 			self.upsample4 = PixelShuffleUpsample(c4)
 			self.upsample5 = PixelShuffleUpsample(c5)
 		else:
-			raise ValueError(f"Unknown upsample type: {self.config['upsample_type']}")
+			raise ValueError(f"Unknown upsample type: {self.model_config['upsample_type']}")
 
 		self.conv_fusion45 = nn.Conv2d(c5//2+c4,c4,kernel_size=3,stride=1,padding=1)
 		self.conv_fusion34 = nn.Conv2d(c4//2+c3,c3,kernel_size=3,stride=1,padding=1)
 
 		# Positional Encoding
-		pos_enc_type = self.config['pos_enc_type']
+		pos_enc_type = self.model_config['pos_enc_type']
 		# 如果使用 concat，我们不需要投影到特定维度，或者投影到一个较小的维度
 		# 这里我们假设直接 concat 原始位置编码，或者投影到一个固定的小维度
 		# 为了简单起见，我们这里设置 out_channels=None，让 PositionEncoding2D 返回原始编码
@@ -1040,25 +1022,33 @@ class GeoFeatModel(nn.Module):
 		head_in_channels = c3 + pos_channels
 
 		# detector
-		self.keypoint_head = KeypointHead(in_channels=head_in_channels, out_channels=65)
+		self.keypoint_dim = self.model_config['keypoint_dim']
+		self.keypoint_head = KeypointHead(in_channels=head_in_channels, out_channels=self.keypoint_dim)
 		# descriptor
-		self.descriptor_dim = self.config['descriptor_dim']
+		self.descriptor_dim = self.model_config['descriptor_dim']
 		self.descriptor_head = DescriptorHead(in_channels=head_in_channels, out_channels=self.descriptor_dim)
 		# geometric features
 		self.geo_head = GeoHead(in_channels=head_in_channels, geo_cfg=self.geo_config)
 		# # heatmap
 		# self.heatmap_head = HeatmapHead(in_channels=head_in_channels,mid_channels=c3,out_channels=1)
 		
-		self.attn_fusion = FeatureBooster(
-			self.config,
-			dropout=False,
-			p=0.1,
-			use_normal=self.geo_config['normal'],
-			use_depth=self.geo_config['depth'],
-			use_gradients=self.geo_config['gradients'],
-			use_curvature=self.geo_config['curvatures'],
-			use_cross=True
-		)
+		self.attn_fusion = FeatureBooster(model_config)
+
+		self.fine_matcher =  nn.Sequential(
+								nn.Linear(128, 512),
+								nn.BatchNorm1d(512, affine=False),
+								nn.ReLU(inplace = True),
+								nn.Linear(512, 512),
+								nn.BatchNorm1d(512, affine=False),
+								nn.ReLU(inplace = True),
+								nn.Linear(512, 512),
+								nn.BatchNorm1d(512, affine=False),
+								nn.ReLU(inplace = True),
+								nn.Linear(512, 512),
+								nn.BatchNorm1d(512, affine=False),
+								nn.ReLU(inplace = True),
+								nn.Linear(512, 64),
+							)
 	
 	def fuse_multi_features(self,x3,x4,x5):
 		# upsample x5 feature
@@ -1117,51 +1107,11 @@ class GeoFeatModel(nn.Module):
 		return des_map, geo_map, keypoint_map
 	
 	def forward2(self, des_map, geo_map, keypoint_map):
-		# descriptors vectorization
+		geo_feat=self._unfold2d(geo_map, ws=8)
+		geo_v=geo_feat.squeeze(0).permute(1,2,0).reshape(-1,geo_feat.shape[1])
 		descs_v=des_map.squeeze(0).permute(1,2,0).reshape(-1,des_map.shape[1])
-		# keypoints vectorization
 		kpts_v=keypoint_map.squeeze(0).permute(1,2,0).reshape(-1,keypoint_map.shape[1])
-		
-		# geometric features vectorization
-		# We need to split geo_map into different components based on config
-		# geo_map channels: [depth(1), normal(3), gradients(2), curvatures(5)]
-		
-		geo_idx = 0
-		depth_v, normal_v, gradients_v, curvature_v = None, None, None, None
-		
-		if self.geo_config['depth']:
-			depth_map = geo_map[:, geo_idx:geo_idx+1, :, :]
-			depth_feat = self._unfold2d(depth_map, ws=8)
-			depth_v = depth_feat.squeeze(0).permute(1,2,0).reshape(-1, depth_feat.shape[1])
-			geo_idx += 1
-			
-		if self.geo_config['normal']:
-			normal_map = geo_map[:, geo_idx:geo_idx+3, :, :]
-			normal_feat = self._unfold2d(normal_map, ws=8)
-			normal_v = normal_feat.squeeze(0).permute(1,2,0).reshape(-1, normal_feat.shape[1])
-			geo_idx += 3
-			
-		if self.geo_config['gradients']:
-			gradients_map = geo_map[:, geo_idx:geo_idx+2, :, :]
-			gradients_feat = self._unfold2d(gradients_map, ws=8)
-			gradients_v = gradients_feat.squeeze(0).permute(1,2,0).reshape(-1, gradients_feat.shape[1])
-			geo_idx += 2
-			
-		if self.geo_config['curvatures']:
-			curvature_map = geo_map[:, geo_idx:geo_idx+5, :, :]
-			curvature_feat = self._unfold2d(curvature_map, ws=8)
-			curvature_v = curvature_feat.squeeze(0).permute(1,2,0).reshape(-1, curvature_feat.shape[1])
-			geo_idx += 5
-
-		# attention fusion
-		# Pass shape for Swin Transformer
-		shape = (des_map.shape[2], des_map.shape[3])
-		descs_refine = self.attn_fusion(descs_v, kpts_v, 
-									  normals=normal_v, 
-									  depth=depth_v, 
-									  gradients=gradients_v, 
-									  curvature=curvature_v,
-									  shape=shape)
+		descs_refine = self.attn_fusion(descs_v, kpts_v, geo_v)
 		return descs_refine
 	
 	def forward(self,x):
@@ -1176,11 +1126,44 @@ if __name__ == "__main__":
 	if img is None:
 		print(f"Failed to load image from {img_path}")
 		exit(1)
-	img=cv2.resize(img, (800,600))
+	# Use safe resolution for Swin (multiple of 160)
+	img=cv2.resize(img, (800,640))
 	# import pdb;pdb.set_trace()
 	img=torch.from_numpy(img).unsqueeze(0).unsqueeze(0).float()/255.0
 	img=img.cuda() if torch.cuda.is_available() else img
-	geofeat_sp=GeoFeatModel(model_config="../config/model_config.json").to(torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
-	des_map, keypoint_map, geo_feats=geofeat_sp.forward1(img)
-	des_fine=geofeat_sp.forward2(des_map,keypoint_map,geo_feats)
-	print(des_map.shape)
+	
+	# Dummy model_config for testing
+	model_config = {
+		"backbone": "Standard",
+		"upsample_type": "bilinear",
+		"pos_enc_type": "None",
+		"keypoint_dim": 65,
+		"descriptor_dim": 64,
+		"keypoint_encoder": [32, 64],
+		"descriptor_encoder": [32, 64],
+		"geometric_features": {
+			"depth": True,
+			"normal": True,
+			"gradients": False,
+			"curvatures": False
+		},
+		"depth_dim": 64, # 1 * 8 * 8
+		"normal_dim": 192, # 3 * 8 * 8
+		"gradient_dim": 128, # 2 * 8 * 8
+		"curvature_dim": 320, # 5 * 8 * 8
+		"depth_encoder": [64, 64],
+		"normal_encoder": [64, 64],
+		"gradient_encoder": [64, 64],
+		"curvature_encoder": [64, 64],
+		"attention_layers": 2,
+		"attention_type": "AFT",
+		"AFT": {"ffn_type": "positionwiseFFN"},
+		"Swin": {"input_resolution": (100, 80), "depth_per_layer": 2, "num_heads": 4, "window_size": 5, "ffn_type": "positionwiseFFN"},
+		"last_activation": "None",
+		"l2_normalization": True
+	}
+
+	geofeat_sp=GeoFeatModel(model_config=model_config).to(torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+	des_map, geo_map, keypoint_map = geofeat_sp.forward1(img)
+	des_fine=geofeat_sp.forward2(des_map, geo_map, keypoint_map)
+	print(f"Output descriptor shape: {des_fine.shape}")

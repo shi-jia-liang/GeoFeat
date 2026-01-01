@@ -153,10 +153,10 @@ class GeoFeat:
 		image, pad_info = self.image_preprocess(image)
 		_, _, _H, _W = image.shape
 
-		descs_map, kpt_logits, geo_feats = self.net.forward1(image)
-		descs_map = self.net.forward2(descs_map, kpt_logits, geo_feats)
+		descs_map, geo_feats, kpt_logits = self.net.forward1(image)
+		descs_refined = self.net.forward2(descs_map, geo_feats, kpt_logits)
 
-		descs_map = descs_map.reshape(descs_map.shape[0], descs_map.shape[2], descs_map.shape[3], -1).permute(0, 3, 1, 2)
+		descs_map = descs_refined.reshape(descs_map.shape[0], descs_map.shape[2], descs_map.shape[3], -1).permute(0, 3, 1, 2)
 		descs_map = F.normalize(descs_map, p=2, dim=1)
 
 		scores = F.softmax(kpt_logits, dim=1)[:, :64]

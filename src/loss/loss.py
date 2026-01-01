@@ -190,6 +190,10 @@ class GeoFeatLoss(nn.Module):
     
     def normal_loss(self,normal,target_normal):
         # import pdb;pdb.set_trace()
+        # Resize target_normal to match normal's spatial dimensions
+        if normal.shape[1:] != target_normal.shape[1:]:
+            target_normal = F.interpolate(target_normal.unsqueeze(0), size=normal.shape[1:], mode='bilinear', align_corners=False).squeeze(0)
+
         normal = normal.permute(1, 2, 0)
         target_normal = target_normal.permute(1,2,0)
         # loss = F.l1_loss(d_feat, depth_anything_normal_feat)
@@ -234,7 +238,29 @@ class GeoFeatLoss(nn.Module):
         loss=torch.cat(loss,dim=-1).mean()
         return loss
 
+    def _split_geo_features(self, geo_map):
+        geo_dict = {}
+        geo_idx = 0
+        if self.geo_config.get('depth', False):
+            geo_dict['depth'] = geo_map[:, geo_idx:geo_idx+1, :, :]
+            geo_idx += 1
+        if self.geo_config.get('normal', False):
+            geo_dict['normal'] = geo_map[:, geo_idx:geo_idx+3, :, :]
+            geo_idx += 3
+        if self.geo_config.get('gradients', False):
+            geo_dict['gradients'] = geo_map[:, geo_idx:geo_idx+2, :, :]
+            geo_idx += 2
+        if self.geo_config.get('curvatures', False):
+            geo_dict['curvatures'] = geo_map[:, geo_idx:geo_idx+5, :, :]
+            geo_idx += 5
+        return geo_dict
+
     def compute_geometric_loss(self, geo_features1, geo_features2, DA_depths1, DA_depths2, megadepth_batch_size):
+        if isinstance(geo_features1, torch.Tensor):
+            geo_features1 = self._split_geo_features(geo_features1)
+        if isinstance(geo_features2, torch.Tensor):
+            geo_features2 = self._split_geo_features(geo_features2)
+
         loss_depth_list = []
         loss_grad_list = []
         loss_curv_list = []
@@ -468,14 +494,12 @@ class GeoFeatLoss(nn.Module):
                 DA_depths1, DA_depths2,
                 megadepth_batch_size,coco_batch_size
                 ):
-    # def forward(self,
-    #             descs1, fb_descs1, kpts1, normals1,
-    #             descs2, fb_descs2, kpts2, normals2,
-    #             pts, coordinates, fb_coordinates,
-    #             alike_kpts1, alike_kpts2,
-    #             DA_normals1, DA_normals2,
-    #             coco_batch_size
-    #                 ):
+        
+        if isinstance(geo_features1, torch.Tensor):
+            geo_features1 = self._split_geo_features(geo_features1)
+        if isinstance(geo_features2, torch.Tensor):
+            geo_features2 = self._split_geo_features(geo_features2)
+
         # import pdb;pdb.set_trace()
         self.loss_descs,self.acc_coarse,conf_list=self.compute_descriptors_loss(descs1,descs2,pts)
         self.loss_fb_descs,self.acc_fb_coarse,fb_conf_list=self.compute_descriptors_loss(fb_descs1,fb_descs2,pts)

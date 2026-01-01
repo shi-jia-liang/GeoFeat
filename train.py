@@ -204,6 +204,27 @@ class Trainer():
 		self.ckpt_dir = self.run_dir  # 后续可细分 ckpts/ 与 logs/
 		logdir = os.path.join(self.run_dir, 'logdir')
 		os.makedirs(logdir, exist_ok=True)
+
+		# 保存本次运行的配置快照，便于追溯训练超参与模型结构
+		config_snapshot = {
+			"timestamp": stamp,
+			"model_name": model_name,
+			"train_params": {
+				"n_steps": n_steps,
+				"save_ckpt_every": save_ckpt_every,
+				"lr": lr,
+				"gamma_steplr": gamma_steplr,
+				"training_res": list(training_res),
+				"device": str(self.dev),
+			},
+			"data_config": self.data_config,
+			"model_config": self.model_config,
+		}
+		try:
+			with open(os.path.join(self.run_dir, 'config_snapshot.json'), 'w', encoding='utf-8') as f:
+				json.dump(config_snapshot, f, indent=2)
+		except Exception as e:
+			print(f"Warning: failed to save config snapshot: {e}")
 		
 		# 清理旧的训练目录
 		self._cleanup_old_runs(ckpt_save_path, model_name, max_runs=max_runs)
@@ -297,11 +318,8 @@ class Trainer():
 	def train(self):
 		self.net.train()
 
-		attempts = 0
-		skipped = 0
 		with tqdm.tqdm(total=self.steps) as pbar:
 			for i in range(self.steps):
-				attempts += 1
 				# import pdb;pdb.set_trace()
 				imgs1_t, imgs2_t, imgs1_np, imgs2_np, positives_coarse = self.generate_train_data()
 
@@ -335,54 +353,47 @@ class Trainer():
 
 				# import pdb;pdb.set_trace()
 
-				fb_feats1, fb_feats2 = [], []
-				# 通过COCO_20K数据训练
+				fb_feats1,fb_feats2=[],[]
 				for b in range(des_feats1.shape[0]):
-					# 特征扁平化
-					feat1 = des_feats1[b].permute(1, 2, 0).reshape(-1, des_feats1.shape[1])
-					feat2 = des_feats2[b].permute(1, 2, 0).reshape(-1, des_feats2.shape[1])
+					feat1=des_feats1[b].permute(1,2,0).reshape(-1,des_feats1.shape[1])
+					feat2=des_feats2[b].permute(1,2,0).reshape(-1,des_feats2.shape[1])
 					
-					# 初始描述子特征匹配
-					coordinate = self.net.fine_matcher(torch.cat([feat1, feat2], dim=-1))
+					coordinate=self.net.fine_matcher(torch.cat([feat1,feat2],dim=-1))
 					coordinates.append(coordinate)
 					
-					fb_feat1=self.net.forward2(feats1[b].unsqueeze(0),kpts1[b].unsqueeze(0),normals1[b].unsqueeze(0))
-					fb_feat2=self.net.forward2(feats2[b].unsqueeze(0),kpts2[b].unsqueeze(0),normals2[b].unsqueeze(0))
+					fb_feat1=self.net.forward2(des_feats1[b].unsqueeze(0),geo_feats1[b].unsqueeze(0),keypoint_map1[b].unsqueeze(0))
+					fb_feat2=self.net.forward2(des_feats2[b].unsqueeze(0),geo_feats2[b].unsqueeze(0),keypoint_map2[b].unsqueeze(0))
 					
 					fb_coordinate=self.net.fine_matcher(torch.cat([fb_feat1,fb_feat2],dim=-1))
 					fb_coordinates.append(fb_coordinate)
 					
-					fb_feats1.append(fb_feat1.unsqueeze(0))
-					fb_feats2.append(fb_feat2.unsqueeze(0))
+					fb_feats1.append(fb_feat1.unsqueeze(0));fb_feats2.append(fb_feat2.unsqueeze(0))
 					
-					img1, img2 = imgs1_t[b], imgs2_t[b]
-					img1 = img1.permute(1, 2, 0).expand(-1, -1, 3).cpu().numpy() * 255
-					img2 = img2.permute(1, 2, 0).expand(-1, -1, 3).cpu().numpy() * 255
-					# ALIKE 关键点提取
-					alike_kpt1 = torch.tensor(self.alike_net.extract_alike_kpts(img1), device=self.dev)
-					alike_kpt2 = torch.tensor(self.alike_net.extract_alike_kpts(img2), device=self.dev)
-					alike_kpts1.append(alike_kpt1)
-					alike_kpts2.append(alike_kpt2)
-
+					img1,img2=imgs1_t[b],imgs2_t[b]
+					img1=img1.permute(1,2,0).expand(-1,-1,3).cpu().numpy() * 255
+					img2=img2.permute(1,2,0).expand(-1,-1,3).cpu().numpy() * 255
+					alike_kpt1=torch.tensor(self.alike_net.extract_alike_kpts(img1),device=self.dev)
+					alike_kpt2=torch.tensor(self.alike_net.extract_alike_kpts(img2),device=self.dev)
+					alike_kpts1.append(alike_kpt1);alike_kpts2.append(alike_kpt2)
+				
 				# import pdb;pdb.set_trace()
-				# 通过MageDepth V2数据训练
 				for b in range(len(imgs1_np)):
 					megadepth_depth1,megadepth_norm1=self.depth_net.extract(imgs1_np[b])
 					megadepth_depth2,megadepth_norm2=self.depth_net.extract(imgs2_np[b])
 					DA_normals1.append(megadepth_norm1);DA_normals2.append(megadepth_norm2)
-				 
+					DA_depths1.append(megadepth_depth1);DA_depths2.append(megadepth_depth2)
+					
 				# import pdb;pdb.set_trace()
-				# 特征重组 调整维度为 (B, C, H, W)
 				fb_feats1=torch.cat(fb_feats1,dim=0)
 				fb_feats2=torch.cat(fb_feats2,dim=0)
-				fb_feats1=fb_feats1.reshape(feats1.shape[0],feats1.shape[2],feats1.shape[3],-1).permute(0,3,1,2)
-				fb_feats2=fb_feats2.reshape(feats2.shape[0],feats2.shape[2],feats2.shape[3],-1).permute(0,3,1,2)
+				fb_feats1=fb_feats1.reshape(des_feats1.shape[0],des_feats1.shape[2],des_feats1.shape[3],-1).permute(0,3,1,2)
+				fb_feats2=fb_feats2.reshape(des_feats2.shape[0],des_feats2.shape[2],des_feats2.shape[3],-1).permute(0,3,1,2)
 				
 				coordinates=torch.cat(coordinates,dim=0)
-				coordinates=coordinates.reshape(feats1.shape[0],feats1.shape[2],feats1.shape[3],-1).permute(0,3,1,2)
+				coordinates=coordinates.reshape(des_feats1.shape[0],des_feats1.shape[2],des_feats1.shape[3],-1).permute(0,3,1,2)
 				
 				fb_coordinates=torch.cat(fb_coordinates,dim=0)
-				fb_coordinates=fb_coordinates.reshape(feats1.shape[0],feats1.shape[2],feats1.shape[3],-1).permute(0,3,1,2)
+				fb_coordinates=fb_coordinates.reshape(des_feats1.shape[0],des_feats1.shape[2],des_feats1.shape[3],-1).permute(0,3,1,2)
 				
 				end=time.perf_counter()
 				print(f"\n\nforward cost {end-start:.1f} seconds")
@@ -559,16 +570,19 @@ if __name__ == '__main__':
 		'curvature_dim': int(cfg.MODEL.CURVATURE_DIM),
 
 		# Swin Transformer 配置
-		'swin_transformer': {
+		'Swin': {
 			'input_resolution': list(cfg.MODEL.SWIN.INPUT_RESOLUTION),
 			'depth_per_layer': int(cfg.MODEL.SWIN.DEPTH_PER_LAYER),
 			'num_heads': int(cfg.MODEL.SWIN.NUM_HEADS),
 			'window_size': int(cfg.MODEL.SWIN.WINDOW_SIZE),
+			'ffn_type': cfg.MODEL.ATTENTION.SWIN.FFN_TYPE,
 		},
 		# 注意力机制配置
 		'attention_layers': int(cfg.MODEL.ATTENTIONAL_LAYERS),
 		'attention_type': cfg.MODEL.ATTENTION.TYPE,
-		'attention_aft_ffn': cfg.MODEL.ATTENTION.AFT.FFN_TYPE,
+		'AFT': {
+			'ffn_type': cfg.MODEL.ATTENTION.AFT.FFN_TYPE,
+		},
 		
 
 		# 细化匹配器配置
