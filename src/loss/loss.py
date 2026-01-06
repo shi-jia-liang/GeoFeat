@@ -303,6 +303,15 @@ class GeoFeatLoss(nn.Module):
                 elif d_target2.dim() == 3:
                     d_target2 = d_target2.unsqueeze(0)
                 
+                # Get prediction size
+                _, _, H_pred, W_pred = cur_geo1[sample_key].shape
+                
+                # Interpolate targets to match prediction size
+                if d_target1.shape[-2:] != (H_pred, W_pred):
+                    d_target1 = F.interpolate(d_target1, size=(H_pred, W_pred), mode='bilinear', align_corners=False)
+                if d_target2.shape[-2:] != (H_pred, W_pred):
+                    d_target2 = F.interpolate(d_target2, size=(H_pred, W_pred), mode='bilinear', align_corners=False)
+
                 # Normalize target depth using Affine-Invariant Normalization (Min-Max)
                 # This is robust to scale and shift ambiguity and guarantees [0, 1] range
                 def min_max_norm(d):
@@ -336,18 +345,33 @@ class GeoFeatLoss(nn.Module):
 
                     # Gradients
                     if self.geo_config.get('gradients', False):
-                        l_g = self.lam_gradients * (F.l1_loss(cur_geo1['grad_x'][b].unsqueeze(0), feat_target1['grad_x']) + \
-                                    F.l1_loss(cur_geo1['grad_y'][b].unsqueeze(0), feat_target1['grad_y']) + \
-                                    F.l1_loss(cur_geo2['grad_x'][b].unsqueeze(0), feat_target2['grad_x']) + \
-                                    F.l1_loss(cur_geo2['grad_y'][b].unsqueeze(0), feat_target2['grad_y']))
+                        # Extract predicted gradients (Channel 0: x, Channel 1: y)
+                        pred_grad1 = cur_geo1['gradients'][b]
+                        pred_grad2 = cur_geo2['gradients'][b]
+                        
+                        l_g = self.lam_gradients * (F.l1_loss(pred_grad1[0:1].unsqueeze(0), feat_target1['grad_x']) + \
+                                    F.l1_loss(pred_grad1[1:2].unsqueeze(0), feat_target1['grad_y']) + \
+                                    F.l1_loss(pred_grad2[0:1].unsqueeze(0), feat_target2['grad_x']) + \
+                                    F.l1_loss(pred_grad2[1:2].unsqueeze(0), feat_target2['grad_y']))
                         loss_grad_list.append(l_g.unsqueeze(0))
 
                     # Curvatures
                     if self.geo_config.get('curvatures', False):
-                        l_c = self.lam_curvature * (F.l1_loss(cur_geo1['k1'][b].unsqueeze(0), feat_target1['k1']) + \
-                                    F.l1_loss(cur_geo1['k2'][b].unsqueeze(0), feat_target1['k2']) + \
-                                    F.l1_loss(cur_geo2['k1'][b].unsqueeze(0), feat_target2['k1']) + \
-                                    F.l1_loss(cur_geo2['k2'][b].unsqueeze(0), feat_target2['k2']))
+                        # Extract predicted curvatures
+                        # Order: k1, k2, gaussian, mean, shape_index
+                        pred_curv1 = cur_geo1['curvatures'][b]
+                        pred_curv2 = cur_geo2['curvatures'][b]
+                        
+                        l_c = self.lam_curvature * (F.l1_loss(pred_curv1[0:1].unsqueeze(0), feat_target1['k1']) + \
+                                    F.l1_loss(pred_curv1[1:2].unsqueeze(0), feat_target1['k2']) + \
+                                    F.l1_loss(pred_curv1[2:3].unsqueeze(0), feat_target1['gaussian_curv']) + \
+                                    F.l1_loss(pred_curv1[3:4].unsqueeze(0), feat_target1['mean_curv']) + \
+                                    F.l1_loss(pred_curv1[4:5].unsqueeze(0), feat_target1['shape_index']) + \
+                                    F.l1_loss(pred_curv2[0:1].unsqueeze(0), feat_target2['k1']) + \
+                                    F.l1_loss(pred_curv2[1:2].unsqueeze(0), feat_target2['k2']) + \
+                                    F.l1_loss(pred_curv2[2:3].unsqueeze(0), feat_target2['gaussian_curv']) + \
+                                    F.l1_loss(pred_curv2[3:4].unsqueeze(0), feat_target2['mean_curv']) + \
+                                    F.l1_loss(pred_curv2[4:5].unsqueeze(0), feat_target2['shape_index']))
                         loss_curv_list.append(l_c.unsqueeze(0))
         
         loss_depth = torch.cat(loss_depth_list).mean() if loss_depth_list else torch.tensor(0.0, device=self.dev)

@@ -518,7 +518,7 @@ class Trainer():
 						with open(self.status_path, 'a', encoding='utf-8') as f:
 							f.write(f"{global_step},{loss.item():.6f},{loss_fb_descs.item():.6f},{loss_kpts.item():.6f},{loss_normals.item():.6f},{loss_depths.item():.6f},{loss_gradients.item():.6f},{loss_curvature.item():.6f},{loss_fb_coordinates.item():.6f},"
 									f"{acc_coarse:.4f},{acc_coordinates:.4f},{acc_fb_coarse:.4f},{acc_fb_coordinates:.4f},{acc_kpt:.4f},"
-									f"{total_pos},{self.opt.param_groups[0]['lr']:.6e},{end-start:.3f},{skipped}\n")
+									f"{total_pos},{self.opt.param_groups[0]['lr']:.6e},{end-start:.3f}\n")
 					except Exception as e:
 						print(f"Warning: Failed to write status: {e}")
 

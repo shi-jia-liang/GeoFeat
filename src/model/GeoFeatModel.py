@@ -864,6 +864,7 @@ class AttentionalNN(nn.Module):
 			input_resolution = model_config["Swin"]["input_resolution"]  # (H, W)
 			if input_resolution is None:
 				raise ValueError("For Swin attention, provide model_config['Swin']['input_resolution'] = (H, W)")
+			self.swin_input_resolution = tuple(input_resolution)
 			depth_per_layer = model_config["Swin"]["depth_per_layer"]
 			num_heads = model_config["Swin"]["num_heads"]
 			window_size = model_config["Swin"]["window_size"]
@@ -882,13 +883,34 @@ class AttentionalNN(nn.Module):
 					desc = layer(desc)
 			return desc
 		elif self.attention_type == 'Swin':
+			input_is_2d = desc.dim() == 2
+			if input_is_2d:
+				desc = desc.unsqueeze(0)
+
 			if shape is None:
-				raise ValueError("Swin requires shape=(H,W) argument when calling forward")
+				B, N, C = desc.shape
+				# 1. Try configured resolution
+				H_cfg, W_cfg = self.swin_input_resolution
+				if H_cfg * W_cfg == N:
+					shape = (H_cfg, W_cfg)
+				else:
+					# 2. Try square fallback
+					H = int(math.sqrt(N))
+					W = H
+					if H * W == N:
+						shape = (H, W)
+					else:
+						# 3. Fail
+						raise ValueError(f"Swin attention requires shape=(H,W) or square/configured input. N={N}, configured={self.swin_input_resolution}")
+
 			H, W = shape
 			B, N, C = desc.shape
 			assert N == H * W, f"desc sequence length {N} incompatible with H*W={H*W}"
 			for layer in self.layers:
 				desc = layer(desc, shape)
+			
+			if input_is_2d:
+				desc = desc.squeeze(0)
 			return desc
 		else:
 			raise ValueError(f"Unknown attention type: {self.attention_type}")

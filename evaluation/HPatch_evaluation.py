@@ -208,13 +208,9 @@ def benchmark_features(match_fn):
     )
 
 
-if __name__ == "__main__":
-    errors = {}
 
-    # Load model config from the same yacs config used in training
-    cfg = get_cfg_defaults()
-
-    model_config = {
+def get_model_config(cfg):
+    return {
         'backbone': cfg.MODEL.BACKBONE,
         'upsample_type': cfg.MODEL.UPSAMPLE_TYPE,
         'pos_enc_type': cfg.MODEL.POS_ENC_TYPE,
@@ -254,7 +250,23 @@ if __name__ == "__main__":
         'output_dim': int(cfg.MODEL.OUTPUT_DIM),
     }
 
+if __name__ == "__main__":
+    errors = {}
+
     weights = os.path.join(os.path.dirname(__file__), "../weights/GeoFeat_20260101_182828/GeoFeat_step2000.pth")
+    print(f"Loading weights from {weights}")
+
+    # Load config from snapshot if available for consistency
+    weights_dir = os.path.dirname(weights)
+    snapshot_path = os.path.join(weights_dir, 'config_snapshot.json')
+    if os.path.exists(snapshot_path):
+        print(f"Loading config from snapshot: {snapshot_path}")
+        with open(snapshot_path, 'r') as f:
+             model_config = json.load(f)['model_config']
+    else:
+        print("Snapshot not found, using default config")
+        model_config = get_model_config(get_cfg_defaults())
+
     model = GeoFeat(model_config=model_config, weight_path=weights)
 
     errors = benchmark_features(model.match_featnet)

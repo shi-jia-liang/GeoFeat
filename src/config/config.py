@@ -24,7 +24,7 @@ cfg.MODEL.BACKBONE = "Standard"
 # PixelShuffle (亚像素卷积)
 cfg.MODEL.UPSAMPLE_TYPE = "bilinear"
 # Positional Encoding options: "None", "fourier","rot_inv"
-cfg.MODEL.POS_ENC_TYPE = "None"
+cfg.MODEL.POS_ENC_TYPE = "rot_inv"
 
 cfg.MODEL.KEYPOINT_DIM = 65
 cfg.MODEL.KEYPOINT_ENCODER = [128, 64, 64]
@@ -47,14 +47,27 @@ cfg.MODEL.NORMAL_ENCODER = [128, 64, 64]
 cfg.MODEL.NORMAL_DIM = 192
 
 cfg.MODEL.GRADIENT_ENCODER = [64, 32, 32]
-cfg.MODEL.GRADIENT_DIM = 96
+cfg.MODEL.GRADIENT_DIM = 128
 
 cfg.MODEL.CURVATURE_ENCODER = [64, 32, 32]
-cfg.MODEL.CURVATURE_DIM = 96
+cfg.MODEL.CURVATURE_DIM = 320
+
+# cfg.MODEL.DEPTH_ENCODER = [128, 64, 64]
+# cfg.MODEL.DEPTH_DIM = 64
+
+
+# cfg.MODEL.NORMAL_ENCODER = [128, 64, 64]
+# cfg.MODEL.NORMAL_DIM = 192
+
+# cfg.MODEL.GRADIENT_ENCODER = [64, 32, 32]
+# cfg.MODEL.GRADIENT_DIM = 64
+
+# cfg.MODEL.CURVATURE_ENCODER = [64, 32, 32]
+# cfg.MODEL.CURVATURE_DIM = 160
 
 # Swin-specific
 cfg.MODEL.SWIN = CN()
-cfg.MODEL.SWIN.INPUT_RESOLUTION = [75, 75]
+cfg.MODEL.SWIN.INPUT_RESOLUTION = [75, 100]
 cfg.MODEL.SWIN.DEPTH_PER_LAYER = 2
 cfg.MODEL.SWIN.NUM_HEADS = 8
 cfg.MODEL.SWIN.WINDOW_SIZE = 5
@@ -66,10 +79,10 @@ cfg.MODEL.ATTENTIONAL_LAYERS = 3
 cfg.MODEL.ATTENTION.TYPE = "AFT"     # "AFT" 或 "Swin"
 
 cfg.MODEL.ATTENTION.AFT = CN()
-cfg.MODEL.ATTENTION.AFT.FFN_TYPE = "positionwiseFFN" 	# 当 TYPE="AFT" 时可选 "positionwiseFFN"(PPN) 或 "Swin"
+cfg.MODEL.ATTENTION.AFT.FFN_TYPE = "positionwiseFFN" 	# 当 TYPE="AFT" 时可选 "positionwiseFFN"(PPN) 或 "SwinFFN"
 
 cfg.MODEL.ATTENTION.SWIN = CN()
-cfg.MODEL.ATTENTION.SWIN.FFN_TYPE = "SwinFFN" 			# 当 TYPE="Swin" 时强制 "Swin"
+cfg.MODEL.ATTENTION.SWIN.FFN_TYPE = "SwinFFN" 			# 当 TYPE="Swin" 时强制 "SwinFFN"
 
 
 cfg.MODEL.LAST_ACTIVATION = "sigmoid"
