@@ -1,0 +1,88 @@
+{
+  "timestamp": "20260130_102152",
+  "model_name": "GeoFeat",
+  "train_params": {
+    "n_steps": 100,
+    "save_ckpt_every": 50,
+    "lr": 0.0003,
+    "gamma_steplr": 0.5,
+    "training_res": [
+      800,
+      800
+    ],
+    "device": "cuda"
+  },
+  "data_config": {
+    "use_megadepth": true,
+    "use_coco": true,
+    "megadepth_root_path": "./datasets/MegaDepth",
+    "megadepth_batch_size": 2,
+    "coco_root_path": "./datasets/coco_20k",
+    "coco_batch_size": 2
+  },
+  "model_config": {
+    "backbone": "Standard",
+    "upsample_type": "bilinear",
+    "pos_enc_type": "None",
+    "keypoint_encoder": [
+      128,
+      64,
+      64
+    ],
+    "keypoint_dim": 65,
+    "descriptor_encoder": [
+      64,
+      64
+    ],
+    "descriptor_dim": 64,
+    "geometric_features": {
+      "depth": false,
+      "normal": true,
+      "gradients": false,
+      "curvatures": false
+    },
+    "depth_encoder": [
+      128,
+      64,
+      64
+    ],
+    "depth_dim": 64,
+    "normal_encoder": [
+      128,
+      64,
+      64
+    ],
+    "normal_dim": 192,
+    "gradient_encoder": [
+      64,
+      32,
+      32
+    ],
+    "gradient_dim": 128,
+    "curvature_encoder": [
+      64,
+      32,
+      32
+    ],
+    "curvature_dim": 320,
+    "Swin": {
+      "input_resolution": [
+        75,
+        100
+      ],
+      "depth_per_layer": 2,
+      "num_heads": 8,
+      "window_size": 5,
+      "ffn_type": "SwinFFN"
+    },
+    "attention_layers": 3,
+    "attention_type": "AFT",
+    "AFT": {
+      "ffn_type": "positionwiseFFN"
+    },
+    "last_activation": "sigmoid",
+    "l2_normalization": false,
+    "use_coord_loss": false,
+    "output_dim": 64
+  }
+}

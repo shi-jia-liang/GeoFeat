@@ -5,10 +5,10 @@ cfg = CN()
 
 ##############  ↓  DATA CONFIG  ↓  ##############
 cfg.DATASET = CN()
-cfg.DATASET.NUM_WORKERS = 10
+cfg.DATASET.NUM_WORKERS = 0
 cfg.DATASET.USE_MEGADEPTH = True
 cfg.DATASET.USE_COCO = True
-cfg.DATASET.MEGADEPTH_ROOT_PATH = "D:/DataSets/MegaDepth"
+cfg.DATASET.MEGADEPTH_ROOT_PATH = "./datasets/MegaDepth"
 cfg.DATASET.MEGADEPTH_BATCH_SIZE = 2
 cfg.DATASET.COCO_ROOT_PATH = "./datasets/coco_20k"
 cfg.DATASET.COCO_BATCH_SIZE = 2
@@ -19,12 +19,12 @@ cfg.MODEL = CN()
 # Backbone options: "Standard", "RepVGG"
 cfg.MODEL.BACKBONE = "Standard"        
 
-# Upsample options: "bilinear", "pixel_shuffle"
+# Upsample options: "bilinear", "pixel_shuffle","HS-FPN"
 # Bilinear Upsampling (双线性插值)
 # PixelShuffle (亚像素卷积)
 cfg.MODEL.UPSAMPLE_TYPE = "bilinear"
 # Positional Encoding options: "None", "fourier","rot_inv"
-cfg.MODEL.POS_ENC_TYPE = "rot_inv"
+cfg.MODEL.POS_ENC_TYPE = "None"
 
 cfg.MODEL.KEYPOINT_DIM = 65
 cfg.MODEL.KEYPOINT_ENCODER = [128, 64, 64]

@@ -1,0 +1,15 @@
+[submodule "HS-FPN"]
+	path = HS-FPN
+	url = https://github.com/ShiZican/HS-FPN
+
+[submodule "ALike"]
+	path = 3rdparty/ALike
+	url = https://github.com/Shiaoming/ALIKE
+
+[submodule "Depth-Anything-V2"]
+	path = 3rdparty/Depth-Anything-V2
+	url = https://github.com/DepthAnything/Depth-Anything-V2
+
+[submodule "Depth-Anything-3"]
+	path = 3rdparty/Depth-Anything-3
+	url = https://github.com/ByteDance-Seed/Depth-Anything-3

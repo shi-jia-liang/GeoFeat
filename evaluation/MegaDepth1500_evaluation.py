@@ -78,8 +78,8 @@ os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
 use_cuda = torch.cuda.is_available()
 device = "cuda" if use_cuda else "cpu"
 
-DATASET_ROOT = os.path.join(os.path.dirname(__file__),'../datasets/megadepth_test_1500')
-DATASET_JSON = os.path.join(os.path.dirname(__file__),'../datasets/megadepth_1500.json')
+DATASET_ROOT = os.path.join(os.path.dirname(__file__),'../data/megadepth_test_1500')
+DATASET_JSON = os.path.join(os.path.dirname(__file__),'../data/megadepth_1500.json')
 
 class MegaDepth1500(Dataset):
     """
@@ -114,9 +114,9 @@ class MegaDepth1500(Dataset):
         image1_path = os.path.join(self.root_dir, data['pair_names'][1])
         
         if not os.path.exists(image0_path):
-             print(f"Warning: Image not found {image0_path}")
+            print(f"Warning: Image not found {image0_path}")
         if not os.path.exists(image1_path):
-             print(f"Warning: Image not found {image1_path}")
+            print(f"Warning: Image not found {image1_path}")
 
         image0 = cv2.resize(cv2.imread(image0_path),(w1, h1))
         image1 = cv2.resize(cv2.imread(image1_path),(w2, h2))
@@ -134,7 +134,7 @@ class MegaDepth1500(Dataset):
         return data
 
 if __name__ == "__main__":
-    weights = os.path.join(os.path.dirname(__file__), '../weights/baseline_20260101_224524/baseline_step30000.pth')
+    weights = os.path.join(os.path.dirname(__file__), '../weights_win/GeoFeat_20260130_102152/GeoFeat_step100.pth')
     
     print(f"Loading weights from {weights}")
 

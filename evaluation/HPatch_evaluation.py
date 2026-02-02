@@ -253,7 +253,7 @@ def get_model_config(cfg):
 if __name__ == "__main__":
     errors = {}
 
-    weights = os.path.join(os.path.dirname(__file__), "../weights/GeoFeat_20260101_182828/GeoFeat_step2000.pth")
+    weights = os.path.join(os.path.dirname(__file__), "../weights_win/GeoFeat_20260130_102152/GeoFeat_step100.pth")
     print(f"Loading weights from {weights}")
 
     # Load config from snapshot if available for consistency

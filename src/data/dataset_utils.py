@@ -1,5 +1,5 @@
 """
-	"LiftFeat: 3D Geometry-Aware Local Feature Matching"
+	"Feat: 3D Geometry-Aware Local Feature Matching"
 
     MegaDepth data handling was adapted from 
     LoFTR official code: https://github.com/zju3dv/LoFTR/blob/master/src/datasets/megadepth.py

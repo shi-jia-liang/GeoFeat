@@ -1,0 +1,1 @@
+step,loss,loss_fb_descs,loss_kpts,loss_normals,loss_depths,loss_gradients,loss_curvature,loss_fb_coordinates,acc_coarse,acc_coordinates,acc_fb_coarse,acc_fb_coordinates,acc_kpt,total_pos,lr,forward_cost,skipped

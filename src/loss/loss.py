@@ -603,12 +603,12 @@ class GeoFeatLoss(nn.Module):
             'acc_fb_coarse':self.acc_fb_coarse,
             'loss_fb_coordinates':self.lam_fb_coordinates*self.loss_fb_coordinates,
             'acc_fb_coordinates':self.acc_fb_coordinates,
-            'loss_kpts':self.lam_kpts*self.loss_kpts,
+            'loss_kpts':self.lam_kpts * self.loss_kpts,
             'acc_kpt':self.acc_kpt,
-            'loss_normals':self.lam_normals*self.loss_normals,
-            'loss_depths': self.loss_depths,
-            'loss_gradients': self.loss_gradients,
-            'loss_curvature': self.loss_curvature,
+            'loss_normals':self.lam_normals * self.loss_normals,
+            'loss_depths': self.lam_depth * self.loss_depths,
+            'loss_gradients': self.lam_gradients * self.loss_gradients,
+            'loss_curvature': self.lam_curvature * self.loss_curvature,
             'loss_deep_supervision': self.lam_deep_supervision * self.loss_deep_supervision
         }
 

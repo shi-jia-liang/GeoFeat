@@ -23,7 +23,7 @@ def parse_arguments():
 
 	# training setting
 	# 保存权重
-	parser.add_argument('--ckpt_save_path', type=str, default='weights',
+	parser.add_argument('--ckpt_save_path', type=str, default='weights_win',
 						help='Path to save the checkpoints.')
 	# 训练步数
 	parser.add_argument('--n_steps', type=int, default=160_000,
@@ -82,7 +82,7 @@ from utils.alike_wrapper import ALikeExtractor
 
 from data.coco_augmentor import COCOAugmentor
 from data import coco_wrapper
-from src.data.megadepth_new import MegaDepthCleanedDataset
+from src.data.megadepth import MegaDepthDataset
 from src.data import megadepth_wrapper
 
 import setproctitle
@@ -179,14 +179,14 @@ class Trainer():
 		self.use_megadepth = use_megadepth
 		self.megadepth_batch_size = megadepth_batch_size
 		if self.use_megadepth:
-			TRAIN_BASE_PATH = f"{megadepth_root_path}/megadepth_indices_new"
+			TRAIN_BASE_PATH = f"{megadepth_root_path}/megadepth_indices"
 			TRAINVAL_DATA_SOURCE = f"{megadepth_root_path}/MegaDepth_v1"
 
 			TRAIN_NPZ_ROOT = f"{TRAIN_BASE_PATH}/scene_info_0.1_0.7"
 
 			npz_paths = glob.glob(TRAIN_NPZ_ROOT + '/*.npz')[:]
 			megadepth_dataset = torch.utils.data.ConcatDataset(
-				[MegaDepthCleanedDataset(
+				[MegaDepthDataset(
 					root_dir=TRAINVAL_DATA_SOURCE,
 					npz_path=path,
 					img_resize=training_res) 
@@ -433,20 +433,18 @@ class Trainer():
 				loss_items.append(loss_fb_descs.unsqueeze(0))   # 增强特征匹配损失
 				loss_items.append(loss_kpts.unsqueeze(0))       # 关键点损失
 				
-				# Add normal loss if enabled
-				if self.model_config.get('geometric_features', {}).get('normal', True):
-					loss_items.append(loss_normals.unsqueeze(0))    # 法向量损失
-
 				# Add geometric losses if enabled
 				geo_config = self.model_config.get('geometric_features', {})
+				if geo_config.get('normal', False):
+					loss_items.append(loss_normals.unsqueeze(0))    	# 法向量损失
 				if geo_config.get('depth', False):
-					loss_items.append(loss_depths.unsqueeze(0))     # 深度损失
+					loss_items.append(loss_depths.unsqueeze(0))     	# 深度损失
 				if geo_config.get('gradients', False):
-					loss_items.append(loss_gradients.unsqueeze(0))  # 梯度损失
+					loss_items.append(loss_gradients.unsqueeze(0))  	# 梯度损失
 				if geo_config.get('curvatures', False):
-					loss_items.append(loss_curvature.unsqueeze(0))  # 曲率损失
+					loss_items.append(loss_curvature.unsqueeze(0))  	# 曲率损失
 				if self.use_coord_loss:
-					loss_items.append(loss_fb_coordinates.unsqueeze(0))     # 坐标损失
+					loss_items.append(loss_fb_coordinates.unsqueeze(0))  # 坐标损失
 
 				# nb_coarse = len(m1)
 				# nb_coarse = len(fb_m1)
