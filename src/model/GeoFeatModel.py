@@ -7,6 +7,8 @@ import os
 import torch
 from torch import nn
 import torch.nn.functional as F
+import torch_dct as DCT
+from einops import rearrange
 
 import tqdm
 import math
@@ -15,8 +17,6 @@ import cv2
 import sys
 from typing import List, Tuple, Optional
 
-import torch_dct as DCT
-from einops import rearrange
 
 """
 foundational functions
@@ -92,40 +92,29 @@ def sample_descriptors_fix_sampling(keypoints, descriptors, s: int = 8):
 	)
 	return descriptors
 
-# --------- HS-FPN Modules (Ported & Adapted) ---------
-class ConvModule(nn.Module):
-	"""Shim for MMCV ConvModule"""
-	def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, groups=1, bias=False, norm_cfg=True, act_cfg=True):
-		super().__init__()
-		layers = [nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding, groups=groups, bias=bias)]
-		if norm_cfg:
-			layers.append(nn.BatchNorm2d(out_channels))
-		if act_cfg:
-			layers.append(nn.ReLU(inplace=True))
-		self.block = nn.Sequential(*layers)
-	def forward(self, x):
-		return self.block(x)
 
-class DctSpatialInteraction(nn.Module):
+# ==================================================================================================
+# Frequency-Spatial Refiner (FSR) Module
+# ==================================================================================================
+
+class SpectralSpatialGate(nn.Module):
 	def __init__(self, in_channels, ratio, isdct=True):
-		super(DctSpatialInteraction, self).__init__()
+		super().__init__()
 		self.ratio = ratio
 		self.isdct = isdct
 		if not self.isdct:
-			self.spatial1x1 = nn.Sequential(
-				nn.Conv2d(in_channels, 1, kernel_size=1, bias=False) # Simplified ConvModule
-			)
+			self.spatial1x1 = nn.Conv2d(in_channels, 1, kernel_size=1, bias=False)
 
 	def forward(self, x):
 		_, _, h0, w0 = x.size()
 		if not self.isdct:
 			return x * torch.sigmoid(self.spatial1x1(x))
-		# if DCT is None: return x # Fallback
+		
 		idct = DCT.dct_2d(x, norm='ortho') 
 		weight = self._compute_weight(h0, w0, self.ratio).to(x.device)
 		weight = weight.view(1, h0, w0).expand_as(idct)             
-		dct = idct * weight # filter out low-frequency features 
-		dct_ = DCT.idct_2d(dct, norm='ortho') # generate spatial mask
+		dct = idct * weight 
+		dct_ = DCT.idct_2d(dct, norm='ortho') 
 		return x * dct_
 
 	def _compute_weight(self, h, w, ratio):
@@ -135,16 +124,23 @@ class DctSpatialInteraction(nn.Module):
 		weight[:h0, :w0] = 0
 		return weight
 
-class DctChannelInteraction(nn.Module):
+class SpectralChannelGate(nn.Module):
 	def __init__(self, in_channels, patch, ratio, isdct=True):
-		super(DctChannelInteraction, self).__init__()
+		super().__init__()
 		self.in_channels = in_channels
-		self.h = patch[0]
-		self.w = patch[1]
+		self.h, self.w = patch
 		self.ratio = ratio
 		self.isdct = isdct
-		self.channel1x1 = ConvModule(in_channels, in_channels, kernel_size=1, groups=32, bias=False)
-		self.channel2x1 = ConvModule(in_channels, in_channels, kernel_size=1, groups=32, bias=False)
+		
+		self.channel1x1 = nn.Sequential(
+			nn.Conv2d(in_channels, in_channels, kernel_size=1, groups=32, bias=False),
+			nn.BatchNorm2d(in_channels),
+			nn.ReLU(inplace=True)
+		)
+		self.channel2x1 = nn.Sequential(
+			nn.Conv2d(in_channels, in_channels, kernel_size=1, groups=32, bias=False),
+			nn.BatchNorm2d(in_channels)
+		)
 		self.relu = nn.ReLU()
 
 	def forward(self, x):
@@ -155,7 +151,6 @@ class DctChannelInteraction(nn.Module):
 			channel = self.channel1x1(self.relu(amaxp)) + self.channel1x1(self.relu(aavgp))
 			return x * torch.sigmoid(self.channel2x1(channel))
 
-		# if DCT is None: return x
 		idct = DCT.dct_2d(x, norm='ortho')
 		weight = self._compute_weight(h, w, self.ratio).to(x.device)
 		weight = weight.view(1, h, w).expand_as(idct)             
@@ -177,11 +172,11 @@ class DctChannelInteraction(nn.Module):
 		weight[:h0, :w0] = 0
 		return weight  
 
-class HFP(nn.Module):
+class SpectralPerceptionBlock(nn.Module):
 	def __init__(self, in_channels, ratio, patch=(8,8), isdct=True):
-		super(HFP, self).__init__()
-		self.spatial = DctSpatialInteraction(in_channels, ratio=ratio, isdct=isdct) 
-		self.channel = DctChannelInteraction(in_channels, patch=patch, ratio=ratio, isdct=isdct)
+		super().__init__()
+		self.spatial = SpectralSpatialGate(in_channels, ratio=ratio, isdct=isdct) 
+		self.channel = SpectralChannelGate(in_channels, patch=patch, ratio=ratio, isdct=isdct)
 		self.out =  nn.Sequential(
 			nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1),
 			nn.GroupNorm(32, in_channels)
@@ -191,66 +186,68 @@ class HFP(nn.Module):
 		channel = self.channel(x)
 		return self.out(spatial + channel)
 
-class SDP(nn.Module):
+class SpatialDependencyAttn(nn.Module):
 	def __init__(self, dim=256, inter_dim=None):
-		super(SDP, self).__init__()
+		super().__init__()
 		self.inter_dim = inter_dim or dim
-		self.conv_q = nn.Sequential(nn.Conv2d(dim, self.inter_dim, 1, bias=False), nn.GroupNorm(32, self.inter_dim))
-		self.conv_k = nn.Sequential(nn.Conv2d(dim, self.inter_dim, 1, bias=False), nn.GroupNorm(32, self.inter_dim))
+		self.conv_q = nn.Sequential(nn.Conv2d(dim, self.inter_dim, 3, padding=1, bias=False), nn.GroupNorm(32, self.inter_dim))
+		self.conv_k = nn.Sequential(nn.Conv2d(dim, self.inter_dim, 3, padding=1, bias=False), nn.GroupNorm(32, self.inter_dim))
+		self.conv = nn.Sequential(nn.Conv2d(self.inter_dim, dim, 3, padding=1, bias=False), nn.GroupNorm(32, dim))
 		self.softmax = nn.Softmax(dim=-1)
-		
-	def forward(self, x_low, x_high, patch_size):
-		# x_low: current level (finer), x_high: upper level upsampled (coarser info)
-		b_, _, h_, w_ = x_low.size()
-		# patch_size corresponds to the grid size of the coarse level (h, w)
-		# rearrange: b c (h p1) (w p2) -> ...
-		p1 = patch_size[0] # h of coarse
-		p2 = patch_size[1] # w of coarse
-		# Actually, p1 should be H_low / h_coarse?
-		# No, in HS-FPN code: patch_size passed is [h_coarse, w_coarse].
-		# And p1=patch_size[0].
-		# This seems to imply x_low is split into h_coarse x w_coarse patches.
-		# Meaning each patch has size (H_low/h_coarse, W_low/w_coarse).
-		# Wait, rearrange syntax: (h p1) means h chunks of size p1.
-		# The prompt code: p1=patch_size[0]. 
-		# If patch_size[0] is h (coarse height), then we have h chunks? 
-		# If H_low = 2*h. Then we have 2 chunks of size h? Or h chunks of size 2?
-		# HS-FPN: (h p1). With p1=h. This means H_low = h*h? This is unlikely.
-		
-		# Let's re-read HS-FPN carefully.
-		# laterals[3] size h, w.
-		# laterals[2] size 2h, 2w.
-		# patch = [h, w].
-		# SDP(x_low=lat2, x_high=up(lat3), patch).
-		# q = rearrange(..., (h p1) ... p1=patch[0]) => (h p1) where p1=h.
-		# This implies lat2 height (2h) = something * h.
-		# => something = 2.
-		# So h in rearrange is 2. p1 is h.
-		# So it splits into 2x2 grid?? No, 2 vertical, 2 horizontal.
-		# Wait, (b h w) c (p1 p2). h,w in rearrange output are the counts.
-		# If input is (h_symbolic * p1). And p1=h_value.
-		# Then h_symbolic = InputH / h_value = 2h / h = 2.
-		# So we have 2x2 patches. Each patch is hxh size.
-		# This means Global attention within 2x2 regions? No, if patch is hxh, that's huge.
-		# It covers 1/4 of the image.
-		# This makes sense for "Spatial Dependency".
-		
-		# So I will implement exactly as HS-FPN code.
-		# if rearrange is None: return x_low # Fallback
 
+	def forward(self, x_low, x_high, patch_size):
+		b_, _, h_, w_ = x_low.size()
 		q = rearrange(self.conv_q(x_low), 'b c (h p1) (w p2) -> (b h w) c (p1 p2)', p1=patch_size[0], p2=patch_size[1])
-		# q: (B*num_patches) C (H_patch*W_patch)
-		q = q.transpose(1,2) 
+		q = q.transpose(1, 2)
 		k = rearrange(self.conv_k(x_high), 'b c (h p1) (w p2) -> (b h w) c (p1 p2)', p1=patch_size[0], p2=patch_size[1])
 		
-		attn = torch.matmul(q, k) 
-		attn = attn / np.power(self.inter_dim, 0.5)
+		attn = torch.matmul(q, k)
+		attn = attn / (self.inter_dim ** 0.5)
 		attn = self.softmax(attn)
-		v = k.transpose(1,2)
-		output = torch.matmul(attn,v)
+		v = k.transpose(1, 2)
+		output = torch.matmul(attn, v)
 		output = rearrange(output.transpose(1, 2).contiguous(), '(b h w) c (p1 p2) -> b c (h p1) (w p2)', 
 						  p1=patch_size[0], p2=patch_size[1], h=h_//patch_size[0], w=w_//patch_size[1])
-		return output + x_low
+		output = self.conv(output + x_low)
+		return output
+
+class FrequencySpatialRefiner(nn.Module):
+	def __init__(self, in_channels_list, out_channels, ratio=(0.25, 0.25)):
+		super().__init__()
+		self.out_channels = out_channels
+		
+		self.lateral_convs = nn.ModuleList()
+		for inc in in_channels_list:
+			self.lateral_convs.append(nn.Conv2d(inc, out_channels, 1))
+
+		# Perception Blocks (High Level -> Low Level)
+		self.perception_x5 = SpectralPerceptionBlock(out_channels, ratio=None, isdct=False)
+		self.perception_x4 = SpectralPerceptionBlock(out_channels, ratio=ratio, patch=(8,8), isdct=True)
+		self.perception_x3 = SpectralPerceptionBlock(out_channels, ratio=ratio, patch=(16,16), isdct=True)
+		
+		# Cross Scale Attention
+		self.cross_attn_x5_x4 = SpatialDependencyAttn(dim=out_channels)
+		self.cross_attn_x4_x3 = SpatialDependencyAttn(dim=out_channels)
+
+	def forward(self, x3, x4, x5):
+		x3 = self.lateral_convs[0](x3)
+		x4 = self.lateral_convs[1](x4)
+		x5 = self.lateral_convs[2](x5)
+		
+		# x5 Refined
+		x5 = self.perception_x5(x5)
+		h5, w5 = x5.shape[-2:]
+		
+		# x4 Refined
+		x5_up = F.interpolate(x5, size=x4.shape[-2:], mode='nearest')
+		x4 = self.cross_attn_x5_x4(self.perception_x4(x4), x5_up, [h5, w5])
+		h4, w4 = x4.shape[-2:]
+		
+		# x3 Refined
+		x4_up = F.interpolate(x4, size=x3.shape[-2:], mode='nearest')
+		x3 = self.cross_attn_x4_x3(self.perception_x3(x3), x4_up, [h4, w4])
+		
+		return x3
 
 # --------- Backbone Classes ---------
 # ========== StandardBackbone ==========
@@ -764,9 +761,10 @@ class AFTAttention(nn.Module):
 		k = self.key(x)
 		v = self.value(x)
 		# q = torch.sigmoid(q)
-		k = k.T
-		k = torch.softmax(k, dim=-1)
-		k = k.T
+		# k = k.T
+		# k = torch.softmax(k, dim=-1)
+		# k = k.T
+		k = torch.softmax(k, dim=-2)
 		kv = (k * v).sum(dim=-2, keepdim=True)
 		x = q * kv
 		x = self.proj(x)
@@ -1136,9 +1134,8 @@ class FeatureBooster(nn.Module):
 		if geo_v is not None and self.geo_specs:
 			start_idx = 0
 			for name, dim in self.geo_specs:
-				# Slice the corresponding feature vector along the feature dimension (last dim)
-				# geo_v is (B, N, C_total)
-				feat_v = geo_v[..., start_idx : start_idx + dim]
+				# Slice the corresponding feature vector
+				feat_v = geo_v[:, start_idx : start_idx + dim]
 				# Encode and add
 				desc = desc + self.geo_encoders[name](feat_v)
 				if self.use_dropout:
@@ -1176,35 +1173,23 @@ class GeoFeatModel(nn.Module):
 		self.norm = nn.InstanceNorm2d(1)
 		
 		# feature upsample and fusion
-		if self.model_config['upsample_type'] == 'HS-FPN':
-			self.hfp_dim = c3 # Set to 64 to match c3 output
-			
-			# Align channels to HFP dim
-			self.lat3 = nn.Conv2d(c3, self.hfp_dim, 1)
-			self.lat4 = nn.Conv2d(c4, self.hfp_dim, 1)
-			self.lat5 = nn.Conv2d(c5, self.hfp_dim, 1)
-			
-			# HFP Modules
-			self.hfp3 = HFP(self.hfp_dim, ratio=(0.25, 0.25), patch=(8,8), isdct=True)
-			self.hfp4 = HFP(self.hfp_dim, ratio=(0.25, 0.25), patch=(8,8), isdct=True)
-			self.hfp5 = HFP(self.hfp_dim, ratio=None, isdct=False)
-
-			# SDP Modules
-			self.sdp4_5 = SDP(dim=self.hfp_dim)
-			self.sdp3_4 = SDP(dim=self.hfp_dim)
-
-		elif self.model_config['upsample_type'] == 'bilinear':
+		if self.model_config['upsample_type'] == 'bilinear':
 			self.upsample4 = UpsampleLayer(c4)
 			self.upsample5 = UpsampleLayer(c5)
-			self.conv_fusion45 = nn.Conv2d(c5//2+c4,c4,kernel_size=3,stride=1,padding=1)
-			self.conv_fusion34 = nn.Conv2d(c4//2+c3,c3,kernel_size=3,stride=1,padding=1)
 		elif self.model_config['upsample_type'] == 'pixelshuffle':
 			self.upsample4 = PixelShuffleUpsample(c4)
 			self.upsample5 = PixelShuffleUpsample(c5)
-			self.conv_fusion45 = nn.Conv2d(c5//2+c4,c4,kernel_size=3,stride=1,padding=1)
-			self.conv_fusion34 = nn.Conv2d(c4//2+c3,c3,kernel_size=3,stride=1,padding=1)
+		elif self.model_config['upsample_type'] == 'FSR':
+			# Use FrequencySpatialRefiner (Internal implementation)
+			self.freq_refiner = FrequencySpatialRefiner(
+				in_channels_list=[c3, c4, c5],
+				out_channels=c3
+			)
 		else:
 			raise ValueError(f"Unknown upsample type: {self.model_config['upsample_type']}")
+
+		self.conv_fusion45 = nn.Conv2d(c5//2+c4,c4,kernel_size=3,stride=1,padding=1)
+		self.conv_fusion34 = nn.Conv2d(c4//2+c3,c3,kernel_size=3,stride=1,padding=1)
 
 		# Positional Encoding
 		pos_enc_type = self.model_config['pos_enc_type']
@@ -1253,51 +1238,26 @@ class GeoFeatModel(nn.Module):
 								nn.Linear(512, 64),
 							)
 	
-	def fuse_multi_features(self, x3, x4, x5):
-		if self.model_config['upsample_type'] == 'HS-FPN':
-			# 1. Align Channels
-			l3 = self.lat3(x3)
-			l4 = self.lat4(x4)
-			l5 = self.lat5(x5)
-			
-			# 2. HFP Enhancement (High Frequency)
-			l5 = self.hfp5(l5)
-			l4 = self.hfp4(l4)
-			l3 = self.hfp3(l3)
-			
-			# 3. SDP Fusion (Top-Down)
-			# Level 5 -> Level 4
-			_, _, h5, w5 = l5.size()
-			# For HS-FPN mode, we currently use bilinear for internal upsampling or specific if implemented
-			# Using bilinear consistently here as per standard HS-FPN or we could add sub-config
-			u5 = F.interpolate(l5, size=l4.shape[2:], mode='bilinear', align_corners=False)
-			
-			p4 = self.sdp4_5(l4, u5, [h5, w5])
-			
-			# Level 4 -> Level 3
-			_, _, h4, w4 = p4.size()
-			u4 = F.interpolate(p4, size=l3.shape[2:], mode='bilinear', align_corners=False)
-				
-			p3 = self.sdp3_4(l3, u4, [h4, w4])
-			
-			return p3
-		else:
-			# upsample x5 feature
-			x5 = self.upsample5(x5)
-			# align spatial size to x4 to avoid cat mismatch when input H/W not divisible by 32
-			if x5.shape[-2:] != x4.shape[-2:]:
-				x5 = F.interpolate(x5, size=x4.shape[-2:], mode='bilinear', align_corners=False)
-			x4 = torch.cat([x4, x5], dim=1)
-			x4 = self.conv_fusion45(x4)
-			
-			# upsample x4 feature
-			x4 = self.upsample4(x4)
-			# align spatial size to x3 before concat
-			if x4.shape[-2:] != x3.shape[-2:]:
-				x4 = F.interpolate(x4, size=x3.shape[-2:], mode='bilinear', align_corners=False)
-			x3 = torch.cat([x3, x4], dim=1)
-			x = self.conv_fusion34(x3)
-			return x
+	def fuse_multi_features(self,x3,x4,x5):
+		if self.model_config['upsample_type'] == 'FSR':
+			return self.freq_refiner(x3, x4, x5)
+
+		# upsample x5 feature
+		x5 = self.upsample5(x5)
+		# align spatial size to x4 to avoid cat mismatch when input H/W not divisible by 32
+		if x5.shape[-2:] != x4.shape[-2:]:
+			x5 = F.interpolate(x5, size=x4.shape[-2:], mode='bilinear', align_corners=False)
+		x4 = torch.cat([x4, x5], dim=1)
+		x4 = self.conv_fusion45(x4)
+		
+		# upsample x4 feature
+		x4 = self.upsample4(x4)
+		# align spatial size to x3 before concat
+		if x4.shape[-2:] != x3.shape[-2:]:
+			x4 = F.interpolate(x4, size=x3.shape[-2:], mode='bilinear', align_corners=False)
+		x3 = torch.cat([x3, x4], dim=1)
+		x = self.conv_fusion34(x3)
+		return x
 	
 	def _unfold2d(self, x, ws = 2):
 		"""
@@ -1344,19 +1304,12 @@ class GeoFeatModel(nn.Module):
 		return des_map, geo_map, keypoint_map
 	
 	def forward2(self, des_map, geo_map, keypoint_map):
-		B, C, H, W = des_map.shape
-		geo_feat = self._unfold2d(geo_map, ws=8)
-		
-		# Flatten spatial dimensions while preserving batch size: (B, C, H, W) -> (B, N, C)
-		geo_v = geo_feat.flatten(2).transpose(1, 2)
-		descs_v = des_map.flatten(2).transpose(1, 2)
-		kpts_v = keypoint_map.flatten(2).transpose(1, 2)
-		
-		# Pass spatial shape (H, W) for Transformer-based attention (Swin)
-		descs_refine = self.attn_fusion(descs_v, kpts_v, geo_v, shape=(H, W))
-		
-		# Flatten to (TotalPoints, C) to match legacy output format
-		return descs_refine.reshape(-1, descs_refine.shape[-1])
+		geo_feat=self._unfold2d(geo_map, ws=8)
+		geo_v=geo_feat.squeeze(0).permute(1,2,0).reshape(-1,geo_feat.shape[1])
+		descs_v=des_map.squeeze(0).permute(1,2,0).reshape(-1,des_map.shape[1])
+		kpts_v=keypoint_map.squeeze(0).permute(1,2,0).reshape(-1,keypoint_map.shape[1])
+		descs_refine = self.attn_fusion(descs_v, kpts_v, geo_v)
+		return descs_refine
 	
 	def forward(self,x):
 		des_map, geo_map, keypoint_map = self.forward1(x)
@@ -1404,8 +1357,7 @@ if __name__ == "__main__":
 		"AFT": {"ffn_type": "positionwiseFFN"},
 		"Swin": {"input_resolution": (100, 80), "depth_per_layer": 2, "num_heads": 4, "window_size": 5, "ffn_type": "positionwiseFFN"},
 		"last_activation": "None",
-		"l2_normalization": False,
-		"use_coord_loss": False
+		"l2_normalization": True
 	}
 
 	geofeat_sp=GeoFeatModel(model_config=model_config).to(torch.device('cuda' if torch.cuda.is_available() else 'cpu'))

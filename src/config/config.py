@@ -19,9 +19,10 @@ cfg.MODEL = CN()
 # Backbone options: "Standard", "RepVGG"
 cfg.MODEL.BACKBONE = "Standard"        
 
-# Upsample options: "bilinear", "pixel_shuffle","HS-FPN"
+# Upsample options: "bilinear", "pixel_shuffle", "FSR"
 # Bilinear Upsampling (双线性插值)
 # PixelShuffle (亚像素卷积)
+# FSR (Frequency-Spatial Refiner)
 cfg.MODEL.UPSAMPLE_TYPE = "bilinear"
 # Positional Encoding options: "None", "fourier","rot_inv"
 cfg.MODEL.POS_ENC_TYPE = "None"

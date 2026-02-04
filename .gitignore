@@ -11,6 +11,7 @@ logs/
 
 # weights file
 weights/*
+weights_win/*
 
 # onnx models
 *.onnx
@@ -24,6 +25,9 @@ results/
 
 # LiftFeat code
 LiftFeat/
+
+# HS-FPN code
+HS-FPN/
 
 # old versions
 old/

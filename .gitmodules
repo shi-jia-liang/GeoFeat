@@ -1,7 +1,3 @@
-[submodule "HS-FPN"]
-	path = HS-FPN
-	url = https://github.com/ShiZican/HS-FPN
-
 [submodule "ALike"]
 	path = 3rdparty/ALike
 	url = https://github.com/Shiaoming/ALIKE
