@@ -187,29 +187,55 @@ class SpectralPerceptionBlock(nn.Module):
 		return self.out(spatial + channel)
 
 class SpatialDependencyAttn(nn.Module):
-	def __init__(self, dim=256, inter_dim=None):
-		super().__init__()
-		self.inter_dim = inter_dim or dim
-		self.conv_q = nn.Sequential(nn.Conv2d(dim, self.inter_dim, 3, padding=1, bias=False), nn.GroupNorm(32, self.inter_dim))
-		self.conv_k = nn.Sequential(nn.Conv2d(dim, self.inter_dim, 3, padding=1, bias=False), nn.GroupNorm(32, self.inter_dim))
-		self.conv = nn.Sequential(nn.Conv2d(self.inter_dim, dim, 3, padding=1, bias=False), nn.GroupNorm(32, dim))
-		self.softmax = nn.Softmax(dim=-1)
+    def __init__(self, dim=256, inter_dim=None):
+        super().__init__()
+        self.inter_dim = inter_dim or dim
+        self.conv_q = nn.Sequential(nn.Conv2d(dim, self.inter_dim, 3, padding=1, bias=False), nn.GroupNorm(32, self.inter_dim))
+        self.conv_k = nn.Sequential(nn.Conv2d(dim, self.inter_dim, 3, padding=1, bias=False), nn.GroupNorm(32, self.inter_dim))
+        self.conv = nn.Sequential(nn.Conv2d(self.inter_dim, dim, 3, padding=1, bias=False), nn.GroupNorm(32, dim))
+        self.softmax = nn.Softmax(dim=-1)
 
-	def forward(self, x_low, x_high, patch_size):
-		b_, _, h_, w_ = x_low.size()
-		q = rearrange(self.conv_q(x_low), 'b c (h p1) (w p2) -> (b h w) c (p1 p2)', p1=patch_size[0], p2=patch_size[1])
-		q = q.transpose(1, 2)
-		k = rearrange(self.conv_k(x_high), 'b c (h p1) (w p2) -> (b h w) c (p1 p2)', p1=patch_size[0], p2=patch_size[1])
-		
-		attn = torch.matmul(q, k)
-		attn = attn / (self.inter_dim ** 0.5)
-		attn = self.softmax(attn)
-		v = k.transpose(1, 2)
-		output = torch.matmul(attn, v)
-		output = rearrange(output.transpose(1, 2).contiguous(), '(b h w) c (p1 p2) -> b c (h p1) (w p2)', 
-						  p1=patch_size[0], p2=patch_size[1], h=h_//patch_size[0], w=w_//patch_size[1])
-		output = self.conv(output + x_low)
-		return output
+    def forward(self, x_low, x_high, patch_size):
+        # [FIX] Server-sync: Auto-padding for odd resolutions (e.g. 600x800 -> feat map 37x50)
+        b_, c_, h_, w_ = x_low.size()
+        p1, p2 = patch_size[0], patch_size[1]
+        
+        # Compute padding for divisibility
+        pad_h = (p1 - h_ % p1) % p1
+        pad_w = (p2 - w_ % p2) % p2
+        
+        # Pad if necessary (left, right, top, bottom)
+        if pad_h > 0 or pad_w > 0:
+            x_low_padded = F.pad(x_low, (0, pad_w, 0, pad_h))
+            x_high_padded = F.pad(x_high, (0, pad_w, 0, pad_h))
+        else:
+            x_low_padded = x_low
+            x_high_padded = x_high
+
+        # Attention calculation using padded tensors
+        # 'b c (h p1) (w p2) -> (b h w) c (p1 p2)'
+        q = rearrange(self.conv_q(x_low_padded), 'b c (h p1) (w p2) -> (b h w) c (p1 p2)', p1=p1, p2=p2)
+        q = q.transpose(1, 2)
+        k = rearrange(self.conv_k(x_high_padded), 'b c (h p1) (w p2) -> (b h w) c (p1 p2)', p1=p1, p2=p2)
+        
+        attn = torch.matmul(q, k)
+        attn = attn / (self.inter_dim ** 0.5)
+        attn = self.softmax(attn)
+        v = k.transpose(1, 2)
+        output = torch.matmul(attn, v)
+        
+        h_pad, w_pad = x_low_padded.shape[-2:]
+        # Rearrange back: '(b h w) c (p1 p2) -> b c (h p1) (w p2)'
+        output = rearrange(output.transpose(1, 2).contiguous(), '(b h w) c (p1 p2) -> b c (h p1) (w p2)', 
+                          p1=p1, p2=p2, h=h_pad//p1, w=w_pad//p2)
+        
+        output = self.conv(output + x_low_padded)
+        
+        # [FIX] Crop back to original size
+        if pad_h > 0 or pad_w > 0:
+            output = output[:, :, :h_, :w_]
+            
+        return output
 
 class FrequencySpatialRefiner(nn.Module):
 	def __init__(self, in_channels_list, out_channels, ratio=(0.25, 0.25)):
@@ -466,94 +492,6 @@ class PixelShuffleUpsample(nn.Module):
 		x = self.leaky_relu(self.pixel_shuffle(self.bn(self.conv(x))))
 		return x
 
-# --------- Positional Encoding ---------
-class PositionEncoding2D(nn.Module):
-	"""二维位置编码模块 (2D Positional Encoding)
-
-	支持的编码类型 (pos_enc_type):
-	  - 'none'            : 不使用位置编码
-	  - 'fourier'         : 对 x 与 y 分别做多频率 sin/cos 展开 (4 * len(freqs) 通道)
-	  - 'rot_inv'         : 旋转不变的径向位置编码；使用到中心距离 r 及其多频率的 sin/cos (1 + 2 * len(freqs) 通道)
-
-	参数说明:
-	  - pos_enc_type (str): 编码类型
-	  - out_channels (int): 输出通道数（通过 1x1 Conv 将原始位置特征映射到此维度）
-	  - freqs (Iterable[float]): 频率列表，控制 Fourier 展开尺度
-
-	旋转不变性原理:
-	  - rot_inv 仅依赖径向距离 r = sqrt((x-0.5)^2 + (y-0.5)^2)，与图像整体旋转无关
-	"""
-	def __init__(self, pos_enc_type: str = 'none', out_channels=None, freqs=None):
-		super().__init__()
-		assert pos_enc_type in ('None', 'fourier','rot_inv')
-		self.pos_enc_type = pos_enc_type
-		if freqs is not None:
-			self._pos_freqs = list(freqs)
-		else:
-			self._pos_freqs = [1.0, 2.0, 4.0, 8.0]
-
-		# determine number of input positional channels
-		if self.pos_enc_type == 'fourier':
-			in_ch = 4 * len(self._pos_freqs)
-		elif self.pos_enc_type == 'rot_inv':
-			# r 原值 + sin/cos(2π f r)
-			in_ch = 1 + 2 * len(self._pos_freqs)
-		else:
-			in_ch = 0
-
-		self.out_channels = out_channels
-		if in_ch > 0 and out_channels is not None:
-			# 如果是 concat 模式，我们不需要投影层，直接返回原始位置特征
-			# 或者如果需要调整通道数，可以使用投影层
-			# 这里为了灵活性，我们保留投影层，但如果 out_channels 设置为 None，则不投影
-			self.pos_proj = nn.Conv2d(in_ch, out_channels, kernel_size=1)
-			nn.init.normal_(self.pos_proj.weight, mean=0.0, std=1e-2)
-			if self.pos_proj.bias is not None:
-				nn.init.zeros_(self.pos_proj.bias)
-		else:
-			self.pos_proj = None
-
-	def forward(self, x: torch.Tensor):
-		"""Given feature map x (B, C, H, W), return positional features.
-		If out_channels is set, projects to that dimension.
-		Returns None if pos_enc_type is 'none'."""
-		if self.pos_enc_type == 'None':
-			return None
-
-		B, Cx, H, W = x.shape
-		ys = torch.linspace(0, 1, steps=H, device=x.device, dtype=x.dtype)
-		xs = torch.linspace(0, 1, steps=W, device=x.device, dtype=x.dtype)
-		grid_y, grid_x = torch.meshgrid(ys, xs, indexing='ij')
-
-		if self.pos_enc_type == 'fourier':
-			feats = []
-			for f in self._pos_freqs:
-				feats.append(torch.sin(2 * math.pi * f * grid_x))
-				feats.append(torch.cos(2 * math.pi * f * grid_x))
-			for f in self._pos_freqs:
-				feats.append(torch.sin(2 * math.pi * f * grid_y))
-				feats.append(torch.cos(2 * math.pi * f * grid_y))
-			pos = torch.stack(feats, dim=0).unsqueeze(0).expand(B, -1, -1, -1)
-		elif self.pos_enc_type == 'rot_inv':
-			# 以 (0.5, 0.5) 为中心的径向距离 r
-			cx, cy = 0.5, 0.5
-			dx = grid_x - cx
-			dy = grid_y - cy
-			r = torch.sqrt(torch.clamp(dx * dx + dy * dy, min=1e-12))  # (H,W)
-			feats = [r]
-			for f in self._pos_freqs:
-				feats.append(torch.sin(2 * math.pi * f * r))
-				feats.append(torch.cos(2 * math.pi * f * r))
-			pos = torch.stack(feats, dim=0).unsqueeze(0).expand(B, -1, -1, -1)
-
-		pos = pos.to(x.dtype).to(x.device) # type: ignore
-		
-		if self.pos_proj is not None:
-			pos_feat = self.pos_proj(pos)
-			return pos_feat
-		else:
-			return pos
-
 # --------- Head Classes ---------
 class BaseLayer(nn.Module):
 	def __init__(self,in_channels,out_channels,kernel_size=3,stride=1,padding=1,bias=False,activation=True):
@@ -674,8 +612,7 @@ class GeoHead(nn.Module):
 		x = self.leaky_relu(self.bnDepc(self.convDepc(x3)))
 		
 		x = F.normalize(x,p=2,dim=1)
-		return x
-																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																   
+		return x																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																						   
 
 # --------- Encoder Classes ---------
 def MLP(channels: List[int], do_bn: bool = False) -> nn.Module:
@@ -782,7 +719,8 @@ class FeedForwardNetwork(nn.Module):
 		self.dropout = nn.Dropout(p=p)
 
 		if ffn_type == 'positionwiseFFN':
-			self.mlp = MLP([feature_dim, feature_dim*2, feature_dim])
+			hidden = int(feature_dim * expansion)
+			self.mlp = MLP([feature_dim, hidden, feature_dim])
 		elif ffn_type == 'swigluFFN':
 			hidden = int(feature_dim * expansion)
 			self.fc1 = nn.Linear(feature_dim, hidden * 2, bias=False)
@@ -806,274 +744,82 @@ class FeedForwardNetwork(nn.Module):
 		
 		return x
 
-class LinearAttentionalLayer(nn.Module):
-	def __init__(self, feature_dim: int, ffn_type: str = 'positionwiseFFN', dropout: bool = False, p: float = 0.1):
-		super().__init__()
-		self.norm1 = nn.LayerNorm(feature_dim)
-		self.attn = AFTAttention(feature_dim, dropout=dropout, p=p)
-		self.norm2 = nn.LayerNorm(feature_dim)
-		self.ffn = FeedForwardNetwork(feature_dim, ffn_type=ffn_type, dropout=dropout, p=p)
-
-	def forward(self, x: torch.Tensor) -> torch.Tensor:
-		x = x + self.attn(self.norm1(x))
-		x = x + self.ffn(self.norm2(x))
-		return x
-
-# ---------------- utility: window partition / reverse ----------------
-def window_partition(x: torch.Tensor, window_size: int) -> torch.Tensor:
-	# x: B, C, H, W
-	B, C, H, W = x.shape
-	assert H % window_size == 0 and W % window_size == 0
-	x = x.view(B, C, H // window_size, window_size, W // window_size, window_size)
-	x = x.permute(0, 2, 4, 3, 5, 1).contiguous()  # B, nH, nW, winH, winW, C
-	windows = x.view(-1, window_size, window_size, C)  # (num_windows*B), winH, winW, C
-	return windows
-
-def window_reverse(windows: torch.Tensor, window_size: int, H: int, W: int) -> torch.Tensor:
-	# windows: (num_windows*B), winH, winW, C
-	B_times = windows.shape[0] // ((H // window_size) * (W // window_size))
-	C = windows.shape[-1]
-	x = windows.view(B_times, H // window_size, W // window_size, window_size, window_size, C)
-	x = x.permute(0, 5, 1, 3, 2, 4).contiguous()  # B, C, nH, winH, nW, winW
-	x = x.view(B_times, C, H, W)
-	return x
-
-# ---------------- Simplified Swin Transformer ----------------
-class SimpleWindowAttention(nn.Module):
-	def __init__(self, dim, window_size, num_heads, dropout=0.0):
-		super().__init__()
-		self.dim = dim
-		self.window_size = window_size  # (Wh, Ww)
-		self.num_heads = num_heads
-		head_dim = dim // num_heads
-		self.scale = head_dim ** -0.5
-
-		self.qkv = nn.Linear(dim, dim * 3)
-		self.proj = nn.Linear(dim, dim)
-		self.attn_drop = nn.Dropout(dropout)
-		self.proj_drop = nn.Dropout(dropout)
-
-	def forward(self, x):
-		# x: (B*num_windows, N, C)
-		B_, N, C = x.shape
-		qkv = self.qkv(x).reshape(B_, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-		q, k, v = qkv[0], qkv[1], qkv[2]
-
-		attn = (q @ k.transpose(-2, -1)) * self.scale
-		attn = attn.softmax(dim=-1)
-		attn = self.attn_drop(attn)
-
-		x = (attn @ v).transpose(1, 2).reshape(B_, N, C)
-		x = self.proj(x)
-		x = self.proj_drop(x)
-		return x
-
-class SwinBlock(nn.Module):
-	def __init__(self, dim, num_heads, window_size=5, shift_size=0, mlp_ratio=4.0, dropout=0.0, ffn_type='positionwiseFFN'):
-		super().__init__()
-		self.dim = dim
-		self.num_heads = num_heads
-		self.window_size = window_size
-		self.shift_size = shift_size
-		
-		self.norm1 = nn.LayerNorm(dim)
-		self.attn = SimpleWindowAttention(dim, window_size=(window_size, window_size), num_heads=num_heads, dropout=dropout)
-		
-		self.norm2 = nn.LayerNorm(dim)
-		self.mlp = FeedForwardNetwork(dim, ffn_type=ffn_type, expansion=int(mlp_ratio), dropout=(dropout>0), p=dropout)
-
-	def forward(self, x, H, W):
-		# x: B, N, C
-		B, N, C = x.shape
-		shortcut = x
-		x = self.norm1(x)
-		x = x.view(B, H, W, C)
-
-		# Cyclic shift
-		if self.shift_size > 0:
-			shifted_x = torch.roll(x, shifts=(-self.shift_size, -self.shift_size), dims=(1, 2))
-		else:
-			shifted_x = x
-
-		# Partition
-		# window_partition expects B, C, H, W
-		x_permuted = shifted_x.permute(0, 3, 1, 2) 
-		x_windows = window_partition(x_permuted, self.window_size) 
-		x_windows = x_windows.view(-1, self.window_size * self.window_size, C)
-
-		# W-MSA/SW-MSA
-		attn_windows = self.attn(x_windows)
-
-		# Merge windows
-		attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C)
-		shifted_x = window_reverse(attn_windows, self.window_size, H, W) # Returns B, C, H, W
-
-		# Reverse cyclic shift
-		if self.shift_size > 0:
-			x = torch.roll(shifted_x.permute(0, 2, 3, 1), shifts=(self.shift_size, self.shift_size), dims=(1, 2))
-		else:
-			x = shifted_x.permute(0, 2, 3, 1)
-		
-		x = x.view(B, N, C)
-
-		# FFN
-		x = shortcut + x
-		x = x + self.mlp(self.norm2(x))
-		return x
-
-class SwinAttentionalLayer(nn.Module):
-	def __init__(self, feature_dim: int, input_resolution: Tuple[int,int], depth: int = 2, num_heads: int = 8, window_size: int = 7, ffn_type: str = 'positionwiseFFN', dropout: bool = False, p: float = 0.1):
-		super().__init__()
-		self.input_resolution = input_resolution
-		self.blocks = nn.ModuleList()
-		for i in range(depth):
-			shift_size = 0 if (i % 2 == 0) else window_size // 2
-			self.blocks.append(
-				SwinBlock(
-					dim=feature_dim, 
-					num_heads=num_heads, 
-					window_size=window_size, 
-					shift_size=shift_size, 
-					mlp_ratio=4.0, 
-					dropout=p if dropout else 0.0, 
-					ffn_type=ffn_type
-				)
-			)
-
-	def forward(self, x: torch.Tensor, shape: Optional[Tuple[int,int]] = None) -> torch.Tensor:
-		if shape is None:
-			H, W = self.input_resolution
-		else:
-			H, W = shape
-			
-		for blk in self.blocks:
-			x = blk(x, H, W)
-		return x
-
-
 class AFTBlock(nn.Module):
 	"""AFT attention with selectable FFN (PFFN or Swin)."""
 
-	def __init__(self, feature_dim: int, ffn_type: str, swin_cfg: Optional[dict], dropout: bool = False, p: float = 0.1):
+	def __init__(self, feature_dim: int, ffn_type: str, dropout: bool = False, p: float = 0.1):
 		super().__init__()
-		self.ffn_type = ffn_type.lower()
+		self.ffn_type = ffn_type
 		self.norm1 = nn.LayerNorm(feature_dim)
 		self.attn = AFTAttention(feature_dim, dropout=dropout, p=p)
 		self.norm2 = nn.LayerNorm(feature_dim)
-		if self.ffn_type in ("pffn", "positionwiseffn"):
+		if self.ffn_type == "positionwiseFFN":
 			self.ffn = FeedForwardNetwork(feature_dim, ffn_type='positionwiseFFN', dropout=dropout, p=p)
-			self.needs_shape = False
-		elif self.ffn_type == "swigluffn":
+		elif self.ffn_type == "swigluFFN":
 			self.ffn = FeedForwardNetwork(feature_dim, ffn_type='swigluFFN', dropout=dropout, p=p)
-			self.needs_shape = False
-		elif self.ffn_type == "swin":
-			if swin_cfg is None or not swin_cfg["input_resolution"]:
-				raise ValueError("Swin FFN requires Swin model_config with input_resolution")
-			self.ffn = SwinAttentionalLayer(
-				feature_dim,
-				input_resolution=tuple(swin_cfg["input_resolution"]),
-				depth=swin_cfg["depth_per_layer"],
-				num_heads=swin_cfg["num_heads"],
-				window_size=swin_cfg["window_size"],
-				ffn_type=swin_cfg["ffn_type"],
-				dropout=dropout,
-				p=p,
-			)
-			self.needs_shape = True
 		else:
 			raise ValueError(f"Unsupported FFN type for AFT: {ffn_type}")
 
+
 	def forward(self, x: torch.Tensor, shape: Optional[Tuple[int, int]] = None) -> torch.Tensor:
 		x = x + self.attn(self.norm1(x))
-		if self.needs_shape:
-			if shape is None:
-				raise ValueError("Swin FFN requires shape=(H,W) during forward")
-			x = x + self.ffn(self.norm2(x), shape=shape)
-		else:
-			x = x + self.ffn(self.norm2(x))
+		x = x + self.ffn(self.norm2(x))
 		return x
 
 # ---------------- Update AttentionalNN to support Swin ----------------
 # You can replace your existing AttentionalNN with the extended one below (keeps AFT support)
 
 # if cfg["attention_type"] == "AFT":
-# 			self.attn = AFTAttention(feature_dim, dropout=dropout, p=p)
-# 			if cfg["ffn_type"] == "PPN"
-# 				self.ffn = PositionwiseFeedForward(feature_dim, dropout=dropout, p=p)
-# 			elif cfg["ffn_type"] == "swigluFFN":
-# 				self.ffn = swigluFeedForward(feature_dim, dropout=dropout, p=p)
-# 		elif cfg["attention_type"] == "Swin":
-# 			self.attn = SwinAttention(feature_dim, dropout=dropout, p=p)
-# 			self.ffn = SwinFeedForward(feature_dim, dropout=dropout, p=p)
+# 	self.attn = AFTAttention(feature_dim, dropout=dropout, p=p)
+# 	if cfg["ffn_type"] == "PPN"
+# 		self.ffn = PositionwiseFeedForward(feature_dim, dropout=dropout, p=p)
+# 	elif cfg["ffn_type"] == "swigluFFN":
+# 		self.ffn = swigluFeedForward(feature_dim, dropout=dropout, p=p)
 
 class AttentionalNN(nn.Module):
 	def __init__(self, feature_dim: int, layer_num: int, model_config: dict, dropout: bool = False, p: float = 0.1) -> None:
 		super().__init__()
 		self.model_config = model_config
-		self.attention_type = model_config["attention_type"]  # 'AFT' or 'Swin'
 		self.layers = nn.ModuleList()
-		if self.attention_type == 'AFT':
-			aft_cfg = model_config["AFT"]
-			ffn_type = aft_cfg["ffn_type"]
-			swin_cfg = model_config["Swin"]
-			for _ in range(layer_num):
-				self.layers.append(AFTBlock(feature_dim, ffn_type=ffn_type, swin_cfg=swin_cfg, dropout=dropout, p=p))
 		
-		elif self.attention_type == 'Swin':
-			# need to know spatial resolution and block depth / heads / window size
-			input_resolution = model_config["Swin"]["input_resolution"]  # (H, W)
-			if input_resolution is None:
-				raise ValueError("For Swin attention, provide model_config['Swin']['input_resolution'] = (H, W)")
-			self.swin_input_resolution = tuple(input_resolution)
-			depth_per_layer = model_config["Swin"]["depth_per_layer"]
-			num_heads = model_config["Swin"]["num_heads"]
-			window_size = model_config["Swin"]["window_size"]
-			ffn_type = model_config["Swin"]["ffn_type"]
-			for _ in range(layer_num):
-				self.layers.append(SwinAttentionalLayer(feature_dim, input_resolution=input_resolution, depth=depth_per_layer, num_heads=num_heads, window_size=window_size, ffn_type=ffn_type, dropout=dropout, p=p))
-		else:
-			raise ValueError(f"Unknown attention type: {self.attention_type}")
+		# Only AFT is supported now
+		aft_cfg = model_config["AFT"]
+		ffn_type = aft_cfg["ffn_type"]
+		
+		
+		for _ in range(layer_num):
+			self.layers.append(AFTBlock(feature_dim, ffn_type=ffn_type, dropout=dropout, p=p))
 
 	def forward(self, desc: torch.Tensor, shape: Optional[Tuple[int,int]] = None) -> torch.Tensor:
-		if self.attention_type == 'AFT':
-			for layer in self.layers:
-				if isinstance(layer, AFTBlock):
-					desc = layer(desc, shape)
-				else:
-					desc = layer(desc)
-			return desc
-		elif self.attention_type == 'Swin':
-			input_is_2d = desc.dim() == 2
-			if input_is_2d:
-				desc = desc.unsqueeze(0)
-
-			if shape is None:
-				B, N, C = desc.shape
-				# 1. Try configured resolution
-				H_cfg, W_cfg = self.swin_input_resolution
-				if H_cfg * W_cfg == N:
-					shape = (H_cfg, W_cfg)
-				else:
-					# 2. Try square fallback
-					H = int(math.sqrt(N))
-					W = H
-					if H * W == N:
-						shape = (H, W)
-					else:
-						# 3. Fail
-						raise ValueError(f"Swin attention requires shape=(H,W) or square/configured input. N={N}, configured={self.swin_input_resolution}")
-
-			H, W = shape
-			B, N, C = desc.shape
-			assert N == H * W, f"desc sequence length {N} incompatible with H*W={H*W}"
-			for layer in self.layers:
+		for layer in self.layers:
+			if isinstance(layer, AFTBlock):
 				desc = layer(desc, shape)
-			
-			if input_is_2d:
-				desc = desc.squeeze(0)
-			return desc
-		else:
-			raise ValueError(f"Unknown attention type: {self.attention_type}")
+			else:
+				desc = layer(desc)
+		return desc
+
+class LocalRefiner(nn.Module):
+	"""
+	Local Refinement Module using Depthwise Separable Convolution.
+	Injects local inductive bias after global attention.
+	"""
+	def __init__(self, dim, k=3):
+		super().__init__()
+		self.dw = nn.Conv2d(dim, dim, kernel_size=k, stride=1, padding=k//2, groups=dim)
+		self.norm = nn.LayerNorm(dim)
+		self.pw = nn.Conv2d(dim, dim, kernel_size=1)
+		self.act = nn.GELU()
+
+	def forward(self, x):
+		# x: (B, C, H, W) or (B, N, C) if we handle reshaping
+		input_x = x
+		x = self.dw(x)
+		x = x.permute(0, 2, 3, 1) # (B, H, W, C)
+		x = self.norm(x)
+		x = x.permute(0, 3, 1, 2) # (B, C, H, W)
+		x = self.act(x)
+		x = self.pw(x)
+		return input_x + x
 
 class FeatureBooster(nn.Module):
 	def __init__(self, model_config, dropout=False, p=0.1):
@@ -1191,34 +937,16 @@ class GeoFeatModel(nn.Module):
 		self.conv_fusion45 = nn.Conv2d(c5//2+c4,c4,kernel_size=3,stride=1,padding=1)
 		self.conv_fusion34 = nn.Conv2d(c4//2+c3,c3,kernel_size=3,stride=1,padding=1)
 
-		# Positional Encoding
-		pos_enc_type = self.model_config['pos_enc_type']
-		# 如果使用 concat，我们不需要投影到特定维度，或者投影到一个较小的维度
-		# 这里我们假设直接 concat 原始位置编码，或者投影到一个固定的小维度
-		# 为了简单起见，我们这里设置 out_channels=None，让 PositionEncoding2D 返回原始编码
-		# 然后在 Head 中调整输入通道数
-		self.pos_enc = PositionEncoding2D(pos_enc_type=pos_enc_type, out_channels=None)
-		
-		# 计算位置编码的通道数
-		pos_channels = 0
-		if pos_enc_type == 'fourier':
-			pos_channels = 4 * 4 # default 4 freqs
-		elif pos_enc_type == 'rot_inv':
-			pos_channels = 1 + 2 * 4 # default 4 freqs
-			
-		# 调整 Head 的输入通道数
-		head_in_channels = c3 + pos_channels
-
 		# detector
 		self.keypoint_dim = self.model_config['keypoint_dim']
-		self.keypoint_head = KeypointHead(in_channels=head_in_channels, out_channels=self.keypoint_dim)
+		self.keypoint_head = KeypointHead(in_channels=c3, out_channels=self.keypoint_dim)
 		# descriptor
 		self.descriptor_dim = self.model_config['descriptor_dim']
-		self.descriptor_head = DescriptorHead(in_channels=head_in_channels, out_channels=self.descriptor_dim)
+		self.descriptor_head = DescriptorHead(in_channels=c3, out_channels=self.descriptor_dim)
 		# geometric features
-		self.geo_head = GeoHead(in_channels=head_in_channels, geo_cfg=self.geo_config)
+		self.geo_head = GeoHead(in_channels=c3, geo_cfg=self.geo_config)
 		# # heatmap
-		# self.heatmap_head = HeatmapHead(in_channels=head_in_channels,mid_channels=c3,out_channels=1)
+		# self.heatmap_head = HeatmapHead(in_channels=c3, mid_channels=c3,out_channels=1)
 		
 		self.attn_fusion = FeatureBooster(model_config)
 

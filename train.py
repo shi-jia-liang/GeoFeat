@@ -36,7 +36,7 @@ def parse_arguments():
 						help='Gamma value for StepLR scheduler. Default is 0.5.')
 	# 训练尺寸
 	parser.add_argument('--training_res', type=lambda s: tuple(map(int, s.split(','))),
-						default=(800, 800), help='Training resolution as width,height. Default is (800, 800).')
+						default=(800, 600), help='Training resolution as width,height. Default is (800, 600).')
 	# 训练设备
 	parser.add_argument('--device_num', type=str, default='cuda',
 						help='Device number to use for training. Default is "cuda:0".')
@@ -575,9 +575,8 @@ if __name__ == '__main__':
 			'window_size': int(cfg.MODEL.SWIN.WINDOW_SIZE),
 			'ffn_type': cfg.MODEL.ATTENTION.SWIN.FFN_TYPE,
 		},
-		# 注意力机制配置
+		# Attention configuration
 		'attention_layers': int(cfg.MODEL.ATTENTIONAL_LAYERS),
-		'attention_type': cfg.MODEL.ATTENTION.TYPE,
 		'AFT': {
 			'ffn_type': cfg.MODEL.ATTENTION.AFT.FFN_TYPE,
 		},

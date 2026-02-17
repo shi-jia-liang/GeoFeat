@@ -23,8 +23,9 @@ __pycache__/
 # results file
 results/
 
-# LiftFeat code
+# external modules
 LiftFeat/
+HS-FPN/
 
 # old versions
 old/

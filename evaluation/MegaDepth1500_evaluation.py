@@ -55,7 +55,6 @@ def get_model_config(cfg):
             'ffn_type': cfg.MODEL.ATTENTION.SWIN.FFN_TYPE,
         },
         'attention_layers': int(cfg.MODEL.ATTENTIONAL_LAYERS),
-        'attention_type': cfg.MODEL.ATTENTION.TYPE,
         'AFT': {
             'ffn_type': cfg.MODEL.ATTENTION.AFT.FFN_TYPE,
         },
@@ -134,7 +133,7 @@ class MegaDepth1500(Dataset):
         return data
 
 if __name__ == "__main__":
-    weights = os.path.join(os.path.dirname(__file__), '../weights_win/GeoFeat_20260130_102152/GeoFeat_step100.pth')
+    weights = os.path.join(os.path.dirname(__file__), '../weights_win/FSR_20260205_035106/FSR_step10000.pth')
     
     print(f"Loading weights from {weights}")
 
@@ -144,7 +143,7 @@ if __name__ == "__main__":
     if os.path.exists(snapshot_path):
         print(f"Loading config from snapshot: {snapshot_path}")
         with open(snapshot_path, 'r') as f:
-             model_config = json.load(f)['model_config']
+            model_config = json.load(f)['model_config']
     else:
         print("Snapshot not found, using default config")
         model_config = get_model_config(get_cfg_defaults())

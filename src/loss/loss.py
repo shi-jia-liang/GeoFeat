@@ -7,6 +7,25 @@ import time
 from model.GeometricExtractor import CurvatureComputer
 
 def dual_softmax_loss(X, Y, temp = 0.2):
+    """
+    Dual Softmax Loss (双重 Softmax 损失)
+    
+    功能:
+        用于计算特征描述子之间的匹配损失。它通过在两个方向（X->Y 和 Y->X）上分别应用 Softmax
+        来计算匹配概率，并结合 NLLLoss 进行优化。这一过程强化了互为最近邻（Mutual Nearest Neighbor）的约束。
+        
+    公式:
+        Dist(i, j) = <X_i, Y_j> / temp
+        P(j|i) = softmax_j(Dist(i, j))  [X -> Y 的匹配概率]
+        P(i|j) = softmax_i(Dist(i, j))  [Y -> X 的匹配概率]
+        Confidence(i, j) = P(j|i) * P(i|j)
+        Loss = NLLLoss(log(P(j|i)), target) + NLLLoss(log(P(i|j)), target)
+        
+    参数:
+        X (Tensor): 图像1的特征描述子 (B*N, D)
+        Y (Tensor): 图像2的特征描述子 (B*N, D)
+        temp (float): 温度系数，用于缩放相似度，控制分布的尖锐程度。
+    """
     if X.size() != Y.size() or X.dim() != 2 or Y.dim() != 2:
         raise RuntimeError('Error: X and Y shapes must match and be 2D matrices')
 
@@ -26,8 +45,105 @@ def dual_softmax_loss(X, Y, temp = 0.2):
     return loss, conf
 
 
+class LogCoshCircleLoss(nn.Module):
+    """
+    Log-Cosh Circle Loss (对数双曲余弦 Circle 损失)
+    
+    功能:
+        这是一种专为度量学习设计的改进型损失函数，结合了 Circle Loss 的难样本挖掘能力和
+        Log-Cosh 的平滑鲁棒性。
+        1. Circle Loss: 动态加权正负样本的梯度，自动聚焦于难以区分的样本对（相似度低的正样本，相似度高的负样本）。
+        2. Log-Cosh: log(cosh(x)) 是一种类似于 Huber Loss 的平滑函数。在误差较小时表现为 L2 (x^2/2)，
+           在误差较大时表现为 L1 (|x| - log2)。这使得模型对噪声和异常值（Outliers）更加鲁棒。
+    
+    公式:
+        Logit_p = -ap * (sp - delta_p) * gamma
+        Logit_n = an * (sn - delta_n) * gamma
+        L_circle = softplus( logsumexp(Logit_n) + logsumexp(Logit_p) )
+        L_final = log( cosh( L_circle ) )
+        
+        其中:
+        sp: 正样本对相似度, sn: 负样本对相似度
+        ap = clamp(1 + m - sp), an = clamp(sn + m) [自适应权重]
+        delta_p = 1 - m, delta_n = m [边际阈值]
+    
+    参数:
+        m (float): Margin (边际)，用于控制正负样本的分离程度。默认 0.25。
+        gamma (float): Scale factor (缩放因子)，用于放大梯度。默认 64。
+    """
+    def __init__(self, m: float = 0.25, gamma: float = 64) -> None:
+        super(LogCoshCircleLoss, self).__init__()
+        self.m = m
+        self.gamma = gamma
+        self.soft_plus = nn.Softplus()
+
+    def forward(self, sp: torch.Tensor, sn: torch.Tensor) -> torch.Tensor:
+        # sp: (N) or (B, 1) - Similarity of Positive pairs
+        # sn: (N) or (B, M) - Similarity of Negative pairs
+        
+        # Ensure dimensionality
+        if sp.dim() == 1: sp = sp.unsqueeze(1)
+        if sn.dim() == 1: sn = sn.unsqueeze(1)
+        
+        ap = torch.clamp_min(- sp.detach() + 1 + self.m, min=0.)
+        an = torch.clamp_min(sn.detach() + self.m, min=0.)
+
+        delta_p = 1 - self.m
+        delta_n = self.m
+
+        logit_p = - ap * (sp - delta_p) * self.gamma
+        logit_n = an * (sn - delta_n) * self.gamma
+
+        # Sum over negative samples (dim=1) and positive samples (dim=1)
+        # For circle loss with 1 positive per anchor, logsumexp(logit_p) is just logit_p[0]
+        loss_circle = self.soft_plus(torch.logsumexp(logit_n, dim=1) + torch.logsumexp(logit_p, dim=1))
+        
+        # Log-Cosh Smoothing (element-wise first, then mean)
+        loss = torch.log(torch.cosh(loss_circle))
+        
+        return loss.mean()
+
 class GeoFeatLoss(nn.Module):
-    def __init__(self,device,lam_descs=1,lam_fb_descs=1,lam_kpts=1,lam_heatmap=1,lam_normals=1,lam_coordinates=1,lam_fb_coordinates=1,lam_depth=1,lam_gradients=1,lam_curvature=1,lam_deep_supervision=1.0,depth_spvs=True, geo_config=None):
+    """
+    GeoFeat Losses (GeoFeat 总体损失函数)
+    
+    功能:
+        封装了特征检测、描述子匹配、以及几何一致性（Geometric Consistency）约束的所有损失函数。
+        
+    包含:
+        - 描述子匹配损失 (Descriptor Loss): 使用 LogCoshCircleLoss 计算描述子相似度误差，
+          加强大视差下的匹配鲁棒性。
+        - 关键点损失 (Keypoint Loss): 对关键点提取结果进行自适应蒸馏（Distillation）。
+          使用 ALike 方法作为 pseudo-GT 进行监督。
+        - 几何特征损失 (Geometric Loss): 控制深度、法向量、梯度、曲率等几何信息的一致性。
+        - 坐标回归损失 (Coordinate Loss): 直接监督特征点的位置坐标预测精度。
+        - 深层监督损失 (Deep Supervision): 对中间层特征进行额外的辅助监督，加速收敛。
+        
+    公式:
+        L_total = lambda_descs * L_circle(D1, D2) 
+                  + lambda_kpts * L_distill(K1, K2)
+                  + lambda_geo * (L_depth + L_normal + L_curv + ...)
+                  ...
+    
+    参数:
+        lam_*: 各个子损失项的权重系数。
+        geo_config: 控制哪些几何特征参与训练 (normal, depth, etc.)
+    """
+    def __init__(self,
+                device,
+                lam_descs=1,
+                lam_fb_descs=1,
+                lam_kpts=1,
+                lam_heatmap=1,
+                lam_normals=1,
+                lam_coordinates=1,
+                lam_fb_coordinates=1,
+                lam_depth=1,
+                lam_gradients=1,
+                lam_curvature=1,
+                lam_deep_supervision=1.0,
+                depth_spvs=True, 
+                geo_config=None):
         super().__init__()
         
         # loss parameters (损失函数权重参数)
@@ -73,6 +189,7 @@ class GeoFeatLoss(nn.Module):
         # device
         self.dev=device
         self.curvature_computer = CurvatureComputer().to(device)
+        self.circle_loss = LogCoshCircleLoss(m=0.25, gamma=64).to(device)
         
     
     def check_accuracy(self,m1,m2,pts1=None,pts2=None,plot=False):
@@ -95,6 +212,20 @@ class GeoFeatLoss(nn.Module):
             return acc    
     
     def compute_descriptors_loss(self,descs1,descs2,pts):
+        """
+        Descriptor Loss (Log-Cosh Circle Loss)
+        
+        功能:
+            计算描述子对（Pairs）之间的 Circle Loss，并同时返回粗匹配准确率和置信度矩阵。
+            用于拉近所有正样本对（Matched Pairs）在特征空间的余弦距离，并推远负样本对（Unmatched Pairs）。
+            
+        过程:
+            1. 取出批次中对应的描述子 m1 和 m2。
+            2. 使用 m1 @ m2.T 构建相似度矩阵。
+            3. 对角线为正样本 (Similarity of Positive pairs, sp)，非对角线为负样本 (Similarity of Negative pairs, sn)。
+            4. 将 sp, sn 输入 LogCoshCircleLoss 计算每一行的 Circle Loss。
+            5. 同时使用 m1 @ m2.T 计算双重 Softmax 损失的 confidence (用于后续热力图/坐标监督)。
+        """
         loss=[]
         acc=0
         B,_,H,W=descs1.shape
@@ -105,7 +236,47 @@ class GeoFeatLoss(nn.Module):
             m1=descs1[b,:,pts1[:,1].long(),pts1[:,0].long()].permute(1,0)
             m2=descs2[b,:,pts2[:,1].long(),pts2[:,0].long()].permute(1,0)
             
-            loss_per,conf_per=dual_softmax_loss(m1,m2)
+            # --- New Logic: Log-Cosh Circle Loss ---
+            # m1, m2: (N, D)
+            # Normalize first
+            m1 = F.normalize(m1, p=2, dim=1)
+            m2 = F.normalize(m2, p=2, dim=1)
+            
+            # Compute confidence for downstream tasks (Heatmap/Coord loss) using Dual Softmax logic
+            # Use a fixed temperature for confidence estimation
+            temp = 10.0 # equivalent to 1/0.1
+            sim_mat = torch.matmul(m1, m2.t()) * temp
+            
+            conf_matrix12 = F.log_softmax(sim_mat, dim=1)
+            conf_matrix21 = F.log_softmax(sim_mat.t(), dim=1)
+            with torch.no_grad():
+                conf12 = torch.exp(conf_matrix12).max(dim=-1)[0]
+                conf21 = torch.exp(conf_matrix21).max(dim=-1)[0]
+                conf_per = conf12 * conf21
+            
+            # Compute Loss
+            # Typically Circle Loss is calculated per anchor to handle positive/negative balance correctly
+            # But here we have one-to-one matches (diagonal is positive, all others negative)
+            # We can treat each row as an anchor.
+            
+            # Per-row loss calculation for better stability
+            # N = num matches
+            N = m1.size(0)
+            
+            # Positives: (N,)
+            sp = torch.diag(raw_sim)
+            
+            # Negatives: (N, N-1) - for each anchor (row), other cols are negatives
+            # We need to reshape the flat negatives back to (N, N-1) structure to compute per-sample loss
+            mask = torch.eye(N, dtype=torch.bool, device=self.dev)
+            sn = raw_sim[~mask].view(N, -1)
+            
+            # Vectorized Circle Loss (passing N anchors at once)
+            loss_per = self.circle_loss(sp, sn)
+            
+             # --- Old Logic Commented Out ---
+            # loss_per,conf_per=dual_softmax_loss(m1,m2)
+
             loss.append(loss_per.unsqueeze(0))
             conf_list.append(conf_per)
             
@@ -118,6 +289,19 @@ class GeoFeatLoss(nn.Module):
     
     
     def alike_distill_loss(self,kpts,alike_kpts):
+        """
+        ALike Keypoint Distillation Loss (ALike 知识蒸馏损失)
+        
+        功能:
+            使用预训练的 ALike 模型提取的关键点作为伪标签（Pseudo-GT），通过知识蒸馏的方式监督
+            当前模型的关键点提取器（Keypoint Extractor）。
+            这使得模型不需要手工标注关键点（Keypoint Labels），而是直接学习优秀的特征响应图。
+            
+        计算:
+            1. 构建 Label Map (H, W)，并根据 ALike 的关键点位置填充 Index。
+            2. 使用 CrossEntropy（NLLLoss）来最小化预测关键点概率与 Label Map 的差异。
+            3. 特殊采样：对背景区域（Negative）进行随机采样，避免类别不平衡（样本极度不均衡）。
+        """
         C, H, W = kpts.shape
         kpts = kpts.permute(1,2,0)
         # get ALike keypoints
@@ -170,6 +354,19 @@ class GeoFeatLoss(nn.Module):
     
     
     def compute_heatmaps_loss(self,heatmaps1,heatmaps2,pts,conf_list):
+        """
+        Heatmap Loss (热力图辅助回归损失)
+        
+        功能:
+            用于辅助关键点定位的回归。通过描述子匹配信度（Confidence）引导热力图（Heatmap）的学习。
+            如果描述子匹配得好（Confidence 高），则对应的热力图也应该有较强的响应。
+            
+        计算:
+            Loss = L1(H_pred(pt), Conf(pt))
+            - H_pred: 模型预测的热力图强度
+            - Conf: 描述子双重Softmax计算出的“置信度”
+            这相当于一种 Self-Supervised 的一致性约束（Consistency Constraint）。
+        """
         loss=[]
         B,_,H,W=heatmaps1.shape
         
@@ -189,6 +386,24 @@ class GeoFeatLoss(nn.Module):
     
     
     def normal_loss(self,normal,target_normal):
+        """
+        Normal Loss (法向量一致性损失)
+        
+        功能:
+            最小化预测法向量（Prediction Normal）与 Depth-Anything-V2 提取的伪 GT 法向量（Pseudo-GT）
+            之间的夹角（Angular Distance）。
+            用于增强模型对场景平面的感知能力，确保其能预测出正确的表面法向。
+            这一损失仅对 MegaDepth 的 Pseudo-GT 区域有效（Depth-Anything 高置信度区域）。
+            
+        公式:
+            Dot = <N_pred, N_GT> / |N_pred|*|N_GT|
+            Angle = acos(Dot)
+            Loss = mean(Angle[valid_mask])
+            
+        参数:
+            normal (3, H, W): 预测法向量
+            target_normal (3, H, W): GT法向量
+        """
         # import pdb;pdb.set_trace()
         # Resize target_normal to match normal's spatial dimensions
         if normal.shape[1:] != target_normal.shape[1:]:
@@ -256,6 +471,23 @@ class GeoFeatLoss(nn.Module):
         return geo_dict
 
     def compute_geometric_loss(self, geo_features1, geo_features2, DA_depths1, DA_depths2, megadepth_batch_size):
+        """
+        Geometric Loss (几何一致性损失：深度、梯度、曲率)
+        
+        功能:
+            计算所有（可选的）几何特征的损失。这些几何特征不仅包括传统的深度（Depth），
+            还包括通过 GeometricFeatureExtractor 计算得到的 derived 特征，如梯度（Gradient）
+            和曲率（Curvature）。
+            这些特征对大视差匹配极为有用，因为它们比 RGB 更有不变性。
+            
+        包含:
+            - L_Depth: L1(MinMaxNorm(D_pred), MinMaxNorm(D_GT)) 最小化归一化深度的误差。
+            - L_Grad: L1(Grad(D_pred), Grad(D_GT)) 最小化深度的空间梯度差异。
+            - L_Curv: L1(Curv(D_pred), Curv(D_GT)) 最小化曲率（Mean/Gaussian/Principal Curvatures）差异。
+            
+        注意:
+            只在 MegaDepth 数据（带深度信息）上计算，且需进行 Min-Max 归一化以消除绝对尺度带来的歧义（Scale Ambiguity）。
+        """
         if isinstance(geo_features1, torch.Tensor):
             geo_features1 = self._split_geo_features(geo_features1)
         if isinstance(geo_features2, torch.Tensor):
@@ -381,6 +613,21 @@ class GeoFeatLoss(nn.Module):
         return loss_depth, loss_grad, loss_curv
     
     def coordinate_loss(self,coordinate,conf,pts1):
+        """
+        Coordinate Loss (坐标回归损失)
+        
+        功能:
+            监督预测出的特征点坐标位置（Keypoint Location）。
+            与通常的关键点检测（Heatmap）不同，此 loss 旨在让模型直接回归出精确的亚像素坐标。
+            该 loss 根据匹配信度（Confidence）进行加权，即对于匹配得越好的点，其坐标越要准确。
+            
+        公式:
+            Conf = Softmax(Conf_matrix)
+            Loss = Conf * NLLLoss(LogSoftmax(Coord), Label)
+            Label = Keypoint 8x8 Grid Index (Sub-pixel grid)
+            
+            相当于在一个 8x8 的 Grid 范围内预测离散化的 offset。
+        """
         with torch.no_grad():
             coordinate_detached = pts1 * 8
             offset_detached = (coordinate_detached/8) - (coordinate_detached/8).long()
@@ -407,6 +654,20 @@ class GeoFeatLoss(nn.Module):
         return loss*2., acc
     
     def compute_deep_supervision_loss(self, preds, DA_depths, DA_normals, batch_size):
+        """
+        Deep Supervision Loss (深层监督损失)
+        
+        功能:
+            对模型中间层的特征输出进行监督（Supervised Learning）。
+            由于模型较深（Deep Network），早期层可能存在梯度消失或学习缓慢的问题。
+            通过在中间层引入辅助 Loss，迫使中间特征也具有一定的几何语义（Partial Geometric Understanding），
+            从而加速收敛并 regularize 模型。
+        
+        计算:
+            Loss = L1(Downsampled(D_pred), Downsampled(D_GT)) + Cosine(Downsampled(N_pred), Downsampled(N_GT))
+            
+            这一过程需要将 GT 根据中间特征图的分辨率进行下采样（Downsampling）。
+        """
         """
         Compute loss for intermediate predictions (pred_a, pred_b).
         preds: (B, 4, H, W) tensor. Channel 0 is depth, 1-3 is normal.

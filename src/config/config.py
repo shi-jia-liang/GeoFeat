@@ -17,7 +17,7 @@ cfg.DATASET.COCO_BATCH_SIZE = 2
 cfg.MODEL = CN()
 
 # Backbone options: "Standard", "RepVGG"
-cfg.MODEL.BACKBONE = "Standard"        
+cfg.MODEL.BACKBONE = "RepVGG"        
 
 # Upsample options: "bilinear", "pixel_shuffle", "FSR"
 # Bilinear Upsampling (双线性插值)
@@ -66,24 +66,13 @@ cfg.MODEL.CURVATURE_DIM = 320
 # cfg.MODEL.CURVATURE_ENCODER = [64, 32, 32]
 # cfg.MODEL.CURVATURE_DIM = 160
 
-# Swin-specific
-cfg.MODEL.SWIN = CN()
-cfg.MODEL.SWIN.INPUT_RESOLUTION = [75, 100]
-cfg.MODEL.SWIN.DEPTH_PER_LAYER = 2
-cfg.MODEL.SWIN.NUM_HEADS = 8
-cfg.MODEL.SWIN.WINDOW_SIZE = 5
-
 # Attention configuration
-# ATTENTION.TYPE options: "AFT", "Swin"
+# ATTENTION.TYPE options: "AFT"
 cfg.MODEL.ATTENTION = CN()
 cfg.MODEL.ATTENTIONAL_LAYERS = 3
-cfg.MODEL.ATTENTION.TYPE = "AFT"     # "AFT" 或 "Swin"
 
 cfg.MODEL.ATTENTION.AFT = CN()
-cfg.MODEL.ATTENTION.AFT.FFN_TYPE = "positionwiseFFN" 	# 当 TYPE="AFT" 时可选 "positionwiseFFN"(PPN) 或 "SwinFFN"
-
-cfg.MODEL.ATTENTION.SWIN = CN()
-cfg.MODEL.ATTENTION.SWIN.FFN_TYPE = "SwinFFN" 			# 当 TYPE="Swin" 时强制 "SwinFFN"
+cfg.MODEL.ATTENTION.AFT.FFN_TYPE = "positionwiseFFN" 	# "positionwiseFFN" or "swigluFFN"
 
 
 cfg.MODEL.LAST_ACTIVATION = "sigmoid"
