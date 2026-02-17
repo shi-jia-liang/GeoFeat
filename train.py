@@ -121,9 +121,6 @@ class Trainer():
 		self.dev = torch.device(device_num if torch.cuda.is_available() else 'cpu')
 		print(f'Device: {self.dev}')
 
-		self.use_coord_loss = self.model_config.get('use_coord_loss', False)
-		print(f'Coordinate loss: {self.use_coord_loss}')
-		
 		# training model - Pass model config to GeoFeatModel
 		self.net = GeoFeatModel(model_config=self.model_config).to(self.dev)
 		
@@ -135,8 +132,7 @@ class Trainer():
 			lam_descs=1, 
 			lam_fb_descs=2,       # 保持描述子权重
 			lam_kpts=2, 
-			lam_heatmap=1, 
-			lam_fb_coordinates=1, # [重点] 大幅提升坐标回归权重，强迫学习像素级细节
+			lam_heatmap=1,
 			lam_gradients=10,     # [重点] 放大梯度损失，关注边缘细节
 			lam_curvature=10,     # [重点] 放大曲率损失，关注形状细节
 			geo_config=geo_config
@@ -243,8 +239,8 @@ class Trainer():
 		try:
 			with open(self.status_path, 'w', encoding='utf-8') as f:
 				# extended status (detailed loss/acc columns)
-				f.write('step,loss,loss_fb_descs,loss_kpts,loss_normals,loss_depths,loss_gradients,loss_curvature,loss_fb_coordinates,'
-						'acc_coarse,acc_coordinates,acc_fb_coarse,acc_fb_coordinates,acc_kpt,'
+				f.write('step,loss,loss_fb_descs,loss_kpts,loss_normals,loss_depths,loss_gradients,loss_curvature,'
+						'acc_coarse,acc_fb_coarse,acc_kpt,'
 						'total_pos,lr,forward_cost,skipped\n')
 			print(f"Status file initialized: {self.status_path}")
 		except Exception as e:
@@ -346,7 +342,6 @@ class Trainer():
 				des_feats2, geo_feats2, keypoint_map2 = self.net.forward1(imgs2_t)
 				
 				# 初始描述子特征匹配, 增强描述子匹配
-				coordinates, fb_coordinates = [], []
 				alike_kpts1, alike_kpts2 = [], []
 				DA_normals1, DA_normals2 = [], []
 				DA_depths1, DA_depths2 = [], []
@@ -358,14 +353,8 @@ class Trainer():
 					feat1=des_feats1[b].permute(1,2,0).reshape(-1,des_feats1.shape[1])
 					feat2=des_feats2[b].permute(1,2,0).reshape(-1,des_feats2.shape[1])
 					
-					coordinate=self.net.fine_matcher(torch.cat([feat1,feat2],dim=-1))
-					coordinates.append(coordinate)
-					
 					fb_feat1=self.net.forward2(des_feats1[b].unsqueeze(0),geo_feats1[b].unsqueeze(0),keypoint_map1[b].unsqueeze(0))
 					fb_feat2=self.net.forward2(des_feats2[b].unsqueeze(0),geo_feats2[b].unsqueeze(0),keypoint_map2[b].unsqueeze(0))
-					
-					fb_coordinate=self.net.fine_matcher(torch.cat([fb_feat1,fb_feat2],dim=-1))
-					fb_coordinates.append(fb_coordinate)
 					
 					fb_feats1.append(fb_feat1.unsqueeze(0));fb_feats2.append(fb_feat2.unsqueeze(0))
 					
@@ -386,27 +375,20 @@ class Trainer():
 				# import pdb;pdb.set_trace()
 				fb_feats1=torch.cat(fb_feats1,dim=0)
 				fb_feats2=torch.cat(fb_feats2,dim=0)
-				fb_feats1=fb_feats1.reshape(des_feats1.shape[0],des_feats1.shape[2],des_feats1.shape[3],-1).permute(0,3,1,2)
-				fb_feats2=fb_feats2.reshape(des_feats2.shape[0],des_feats2.shape[2],des_feats2.shape[3],-1).permute(0,3,1,2)
-				
-				coordinates=torch.cat(coordinates,dim=0)
-				coordinates=coordinates.reshape(des_feats1.shape[0],des_feats1.shape[2],des_feats1.shape[3],-1).permute(0,3,1,2)
-				
-				fb_coordinates=torch.cat(fb_coordinates,dim=0)
-				fb_coordinates=fb_coordinates.reshape(des_feats1.shape[0],des_feats1.shape[2],des_feats1.shape[3],-1).permute(0,3,1,2)
+				# Flattening/Reshaping removed as forward2 now returns (B, C, H, W) maps directly
 				
 				end=time.perf_counter()
 				print(f"\n\nforward cost {end-start:.1f} seconds")
+				
 				# 损失计算
 				loss_items = []
 
 				# import pdb;pdb.set_trace()
 				loss_info = self.loss_fn(
-					des_feats1, fb_feats1, keypoint_map1, geo_feats1,                 	# 图像1: 描述子 增强描述子 关键点图 几何特征
-					des_feats2, fb_feats2, keypoint_map2, geo_feats2,                 	# 图像2: 描述子 增强描述子 关键点图 几何特征
-					geo_feats1, geo_feats2,                                     	# 几何特征
+					des_feats1, fb_feats1, keypoint_map1, geo_feats1,           # 图像1: 描述子 增强描述子 关键点图 几何特征
+					des_feats2, fb_feats2, keypoint_map2, geo_feats2,           # 图像2: 描述子 增强描述子 关键点图 几何特征
+					geo_feats1, geo_feats2,                                     # 几何特征
 					positives_coarse,                                         	# 粗糙匹配点
-					coordinates, fb_coordinates,                               	# 精细匹配结果
 					alike_kpts1, alike_kpts2,                                  	# ALIKE关键点
 					DA_normals1, DA_normals2,                                  	# MegaDepth法向量
 					DA_depths1, DA_depths2,                                    	# MegaDepth深度
@@ -414,24 +396,23 @@ class Trainer():
 
 				loss_descs = loss_info['loss_descs']
 				acc_coarse = loss_info['acc_coarse']
-				loss_coordinates = loss_info['loss_coordinates']
-				acc_coordinates = loss_info['acc_coordinates']
 				
 				loss_fb_descs = loss_info['loss_fb_descs']
 				acc_fb_coarse = loss_info['acc_fb_coarse']
-				loss_fb_coordinates = loss_info['loss_fb_coordinates']
-				acc_fb_coordinates = loss_info['acc_fb_coordinates']
 				
 				loss_kpts = loss_info['loss_kpts']
 				acc_kpt = loss_info['acc_kpt']
+
 				loss_depths = loss_info['loss_depths']
 				loss_normals = loss_info['loss_normals']
 				loss_gradients = loss_info['loss_gradients']
 				loss_curvature = loss_info['loss_curvature']
-				loss_deep_supervision = loss_info.get('loss_deep_supervision', torch.tensor(0.0, device=self.dev))
-
-				loss_items.append(loss_fb_descs.unsqueeze(0))   # 增强特征匹配损失
+				loss_deep_supervision = loss_info['loss_deep_supervision']
+				
+				loss_items.append(loss_descs.unsqueeze(0))      # 描述子损失
+				loss_items.append(loss_fb_descs.unsqueeze(0))   # [修复] 增强描述子损失
 				loss_items.append(loss_kpts.unsqueeze(0))       # 关键点损失
+				loss_items.append(loss_deep_supervision.unsqueeze(0)) # [修复] 深层监督损失
 				
 				# Add geometric losses if enabled
 				geo_config = self.model_config.get('geometric_features', {})
@@ -443,8 +424,6 @@ class Trainer():
 					loss_items.append(loss_gradients.unsqueeze(0))  	# 梯度损失
 				if geo_config.get('curvatures', False):
 					loss_items.append(loss_curvature.unsqueeze(0))  	# 曲率损失
-				if self.use_coord_loss:
-					loss_items.append(loss_fb_coordinates.unsqueeze(0))  # 坐标损失
 
 				# nb_coarse = len(m1)
 				# nb_coarse = len(fb_m1)
@@ -470,16 +449,12 @@ class Trainer():
 				pbar.set_description(
 						'loss: {:.4f} '
 						'loss_descs: {:.3f} acc_coarse: {:.3f} '
-						'loss_coordinates: {:.3f} acc_coordinates: {:.3f} '
 						'loss_fb_descs: {:.3f} acc_fb_coarse: {:.3f} '
-						'loss_fb_coordinates: {:.3f} acc_fb_coordinates: {:.3f} '
 						'loss_kpts: {:.3f} acc_kpts: {:.3f} '
 						'loss_normals: {:.3f} loss_depths: {:.3f} loss_gradients: {:.3f} loss_curvature: {:.3f} loss_ds: {:.3f}'.format(
 						loss.item(),
 						loss_descs.item(), acc_coarse,
-						loss_coordinates.item(), acc_coordinates,
 						loss_fb_descs.item(), acc_fb_coarse,
-						loss_fb_coordinates.item(), acc_fb_coordinates,
 						loss_kpts.item(), acc_kpt,
 						loss_normals.item(), loss_depths.item(), loss_gradients.item(), loss_curvature.item(), loss_deep_supervision.item()
 					)
@@ -495,13 +470,9 @@ class Trainer():
 				# log文件
 				self.writer.add_scalar('Loss/total', loss.item(), global_step)
 				self.writer.add_scalar('Accuracy/acc_coarse', acc_coarse, global_step)
-				self.writer.add_scalar('Accuracy/acc_coordinates', acc_coordinates, global_step)
 				self.writer.add_scalar('Accuracy/acc_fb_coarse', acc_fb_coarse, global_step)
-				self.writer.add_scalar('Accuracy/acc_fb_coordinates', acc_fb_coordinates, global_step)
 				self.writer.add_scalar('Loss/descs', loss_descs.item(), global_step)
-				self.writer.add_scalar('Loss/coordinates', loss_coordinates.item(), global_step)
 				self.writer.add_scalar('Loss/fb_descs', loss_fb_descs.item(), global_step)
-				self.writer.add_scalar('Loss/fb_coordinates', loss_fb_coordinates.item(), global_step)
 				self.writer.add_scalar('Loss/kpts', loss_kpts.item(), global_step)
 				self.writer.add_scalar('Loss/normals', loss_normals.item(), global_step)
 				self.writer.add_scalar('Loss/depths', loss_depths.item(), global_step)
@@ -514,8 +485,8 @@ class Trainer():
 					try:
 						total_pos = sum(len(p) for p in positives_coarse)
 						with open(self.status_path, 'a', encoding='utf-8') as f:
-							f.write(f"{global_step},{loss.item():.6f},{loss_fb_descs.item():.6f},{loss_kpts.item():.6f},{loss_normals.item():.6f},{loss_depths.item():.6f},{loss_gradients.item():.6f},{loss_curvature.item():.6f},{loss_fb_coordinates.item():.6f},"
-									f"{acc_coarse:.4f},{acc_coordinates:.4f},{acc_fb_coarse:.4f},{acc_fb_coordinates:.4f},{acc_kpt:.4f},"
+							f.write(f"{global_step},{loss.item():.6f},{loss_fb_descs.item():.6f},{loss_kpts.item():.6f},{loss_normals.item():.6f},{loss_depths.item():.6f},{loss_gradients.item():.6f},{loss_curvature.item():.6f},"
+									f"{acc_coarse:.4f},{acc_fb_coarse:.4f},{acc_kpt:.4f},"
 									f"{total_pos},{self.opt.param_groups[0]['lr']:.6e},{end-start:.3f}\n")
 					except Exception as e:
 						print(f"Warning: Failed to write status: {e}")
@@ -537,9 +508,8 @@ if __name__ == '__main__':
 	}
 
 	model_config = {
-		'backbone': cfg.MODEL.BACKBONE,									# 骨干网络
-		'upsample_type': cfg.MODEL.UPSAMPLE_TYPE,						# 上采样类型
-		'pos_enc_type': cfg.MODEL.POS_ENC_TYPE,							# 位置编码类型
+		"backbone": cfg.MODEL.BACKBONE,								# 骨干网络
+		"upsample_type": cfg.MODEL.UPSAMPLE_TYPE,					# 上采样类型
 		# 关键点编码器
 		'keypoint_encoder': list(cfg.MODEL.KEYPOINT_ENCODER),			# 关键点编码器
 		'keypoint_dim': int(cfg.MODEL.KEYPOINT_DIM),					# 关键点维度
@@ -566,27 +536,12 @@ if __name__ == '__main__':
 		# 曲率编码器
 		'curvature_encoder': list(cfg.MODEL.CURVATURE_ENCODER),
 		'curvature_dim': int(cfg.MODEL.CURVATURE_DIM),
-
-		# Swin Transformer 配置
-		'Swin': {
-			'input_resolution': list(cfg.MODEL.SWIN.INPUT_RESOLUTION),
-			'depth_per_layer': int(cfg.MODEL.SWIN.DEPTH_PER_LAYER),
-			'num_heads': int(cfg.MODEL.SWIN.NUM_HEADS),
-			'window_size': int(cfg.MODEL.SWIN.WINDOW_SIZE),
-			'ffn_type': cfg.MODEL.ATTENTION.SWIN.FFN_TYPE,
-		},
-		# Attention configuration
-		'attention_layers': int(cfg.MODEL.ATTENTIONAL_LAYERS),
-		'AFT': {
-			'ffn_type': cfg.MODEL.ATTENTION.AFT.FFN_TYPE,
-		},
-		
-
+		# 注意力机制配置
+		"attention_layers": cfg.MODEL.ATTENTIONAL_LAYERS,
+		"attention_ffn_type": cfg.MODEL.ATTENTION_FFN_TYPE,
+		"refiner_type": cfg.MODEL.REFINER_TYPE,
 		# 细化匹配器配置
-		'last_activation': cfg.MODEL.LAST_ACTIVATION,
-		'l2_normalization': bool(cfg.MODEL.L2_NORMALIZATION),
-		'use_coord_loss': bool(cfg.MODEL.USE_COORD_LOSS),
-
+		"last_activation": cfg.MODEL.LAST_ACTIVATION,
 		# 模型输出维度
 		'output_dim': int(cfg.MODEL.OUTPUT_DIM),
 	}

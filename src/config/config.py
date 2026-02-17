@@ -19,13 +19,10 @@ cfg.MODEL = CN()
 # Backbone options: "Standard", "RepVGG"
 cfg.MODEL.BACKBONE = "RepVGG"        
 
-# Upsample options: "bilinear", "pixel_shuffle", "FSR"
+# Upsample options: "bilinear", "pixel_shuffle"
 # Bilinear Upsampling (双线性插值)
 # PixelShuffle (亚像素卷积)
-# FSR (Frequency-Spatial Refiner)
 cfg.MODEL.UPSAMPLE_TYPE = "bilinear"
-# Positional Encoding options: "None", "fourier","rot_inv"
-cfg.MODEL.POS_ENC_TYPE = "None"
 
 cfg.MODEL.KEYPOINT_DIM = 65
 cfg.MODEL.KEYPOINT_ENCODER = [128, 64, 64]
@@ -67,17 +64,15 @@ cfg.MODEL.CURVATURE_DIM = 320
 # cfg.MODEL.CURVATURE_DIM = 160
 
 # Attention configuration
-# ATTENTION.TYPE options: "AFT"
-cfg.MODEL.ATTENTION = CN()
 cfg.MODEL.ATTENTIONAL_LAYERS = 3
+cfg.MODEL.ATTENTION_FFN_TYPE = "positionwiseFFN" 	# "positionwiseFFN" or "swigluFFN"
 
-cfg.MODEL.ATTENTION.AFT = CN()
-cfg.MODEL.ATTENTION.AFT.FFN_TYPE = "positionwiseFFN" 	# "positionwiseFFN" or "swigluFFN"
-
+# Refiner options: "None", "Local", "Geometric"
+# "Local" uses simple depthwise separable conv
+# "Geometric" uses geometry-guided refinement (Requires geometric features)
+cfg.MODEL.REFINER_TYPE = "None"
 
 cfg.MODEL.LAST_ACTIVATION = "sigmoid"
-cfg.MODEL.L2_NORMALIZATION = False
-cfg.MODEL.USE_COORD_LOSS = False
 
 cfg.MODEL.OUTPUT_DIM = 64
 

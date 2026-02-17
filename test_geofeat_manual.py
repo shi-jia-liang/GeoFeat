@@ -63,7 +63,6 @@ try:
         'descriptor_encoder': [32, 128], # Matching descriptor_dim
         
         'last_activation': 'None',
-        'l2_normalization': True
     }
 
     print("Initializing GeoFeatModel...")

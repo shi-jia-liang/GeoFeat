@@ -136,8 +136,6 @@ class GeoFeatLoss(nn.Module):
                 lam_kpts=1,
                 lam_heatmap=1,
                 lam_normals=1,
-                lam_coordinates=1,
-                lam_fb_coordinates=1,
                 lam_depth=1,
                 lam_gradients=1,
                 lam_curvature=1,
@@ -152,8 +150,6 @@ class GeoFeatLoss(nn.Module):
         self.lam_kpts=lam_kpts                    # 关键点检测损失权重
         self.lam_heatmap=lam_heatmap              # 热力图损失权重
         self.lam_normals=lam_normals              # 法向量一致性损失权重
-        self.lam_coordinates=lam_coordinates      # 初始特征坐标回归损失权重
-        self.lam_fb_coordinates=lam_fb_coordinates # 增强特征坐标回归损失权重
         self.lam_depth=lam_depth                  # 深度估计损失权重
         self.lam_gradients=lam_gradients          # 深度梯度损失权重
         self.lam_curvature=lam_curvature          # 曲率一致性损失权重
@@ -172,8 +168,6 @@ class GeoFeatLoss(nn.Module):
         self.loss_kpts=0            # 关键点损失
         self.loss_heatmaps=0        # 热力图损失
         self.loss_normals=0         # 法向量损失
-        self.loss_coordinates=0     # 坐标损失
-        self.loss_fb_coordinates=0  # 增强坐标损失
         self.loss_depths=0          # 深度损失
         self.loss_gradients=0       # 梯度损失
         self.loss_curvature=0       # 曲率损失
@@ -183,8 +177,6 @@ class GeoFeatLoss(nn.Module):
         self.acc_coarse=0           # 粗匹配精度
         self.acc_fb_coarse=0        # 增强粗匹配精度
         self.acc_kpt=0              # 关键点精度
-        self.acc_coordinates=0      # 坐标回归精度
-        self.acc_fb_coordinates=0   # 增强坐标回归精度
         
         # device
         self.dev=device
@@ -259,6 +251,9 @@ class GeoFeatLoss(nn.Module):
             # But here we have one-to-one matches (diagonal is positive, all others negative)
             # We can treat each row as an anchor.
             
+            # Compute raw cosine similarity for Circle Loss (without temperature scaling)
+            raw_sim = torch.matmul(m1, m2.t())
+
             # Per-row loss calculation for better stability
             # N = num matches
             N = m1.size(0)
@@ -612,47 +607,6 @@ class GeoFeatLoss(nn.Module):
             
         return loss_depth, loss_grad, loss_curv
     
-    def coordinate_loss(self,coordinate,conf,pts1):
-        """
-        Coordinate Loss (坐标回归损失)
-        
-        功能:
-            监督预测出的特征点坐标位置（Keypoint Location）。
-            与通常的关键点检测（Heatmap）不同，此 loss 旨在让模型直接回归出精确的亚像素坐标。
-            该 loss 根据匹配信度（Confidence）进行加权，即对于匹配得越好的点，其坐标越要准确。
-            
-        公式:
-            Conf = Softmax(Conf_matrix)
-            Loss = Conf * NLLLoss(LogSoftmax(Coord), Label)
-            Label = Keypoint 8x8 Grid Index (Sub-pixel grid)
-            
-            相当于在一个 8x8 的 Grid 范围内预测离散化的 offset。
-        """
-        with torch.no_grad():
-            coordinate_detached = pts1 * 8
-            offset_detached = (coordinate_detached/8) - (coordinate_detached/8).long()
-            offset_detached = (offset_detached * 8).long()
-            label = offset_detached[:, 0] + 8*offset_detached[:, 1]
-
-        #pdb.set_trace()
-        coordinate_log = F.log_softmax(coordinate, dim=-1)
-
-        predicted = coordinate.max(dim=-1)[1]
-        acc =  (label == predicted)
-        acc = acc[conf > 0.1]
-        if len(acc) > 0:
-            acc = acc.sum() / len(acc)
-        else:
-            acc = 0.0
-
-        loss = F.nll_loss(coordinate_log, label, reduction = 'none')
-        
-        #Weight loss by confidence, giving more emphasis on reliable matches
-        conf = conf / (conf.sum() + 1e-8)
-        loss = (loss * conf).sum()
-
-        return loss*2., acc
-    
     def compute_deep_supervision_loss(self, preds, DA_depths, DA_normals, batch_size):
         """
         Deep Supervision Loss (深层监督损失)
@@ -748,32 +702,12 @@ class GeoFeatLoss(nn.Module):
             return torch.tensor(0.0, device=self.dev)
             
         return torch.stack(loss_list).mean()
-
-    def compute_coordinates_loss(self,coordinates,pts,conf_list):
-        loss=[]
-        acc=0
-        B,_,H,W=coordinates.shape
-        
-        for b in range(B):
-            pts1,pts2=pts[b][:,:2],pts[b][:,2:]
-            coordinate=coordinates[b,:,pts1[:,1].long(),pts1[:,0].long()].permute(1,0)
-            conf=conf_list[b]
-            
-            loss_per,acc_per=self.coordinate_loss(coordinate,conf,pts1)
-            loss.append(loss_per.unsqueeze(0))
-            acc += acc_per
-            
-        loss=torch.cat(loss,dim=-1).mean()
-        acc /= B
-        
-        return loss,acc
-        
         
     def forward(self,
                 descs1,fb_descs1,kpts1,normals1,
                 descs2,fb_descs2,kpts2,normals2,
                 geo_features1, geo_features2,
-                pts,coordinates,fb_coordinates,
+                pts,
                 alike_kpts1,alike_kpts2,
                 DA_normals1,DA_normals2,
                 DA_depths1, DA_depths2,
@@ -851,19 +785,12 @@ class GeoFeatLoss(nn.Module):
                 loss_ds_b /= 2
                 
         self.loss_deep_supervision = loss_ds_a + loss_ds_b
-
-        self.loss_coordinates,self.acc_coordinates=self.compute_coordinates_loss(coordinates,pts,conf_list)
-        self.loss_fb_coordinates,self.acc_fb_coordinates=self.compute_coordinates_loss(fb_coordinates,pts,fb_conf_list)
         
         return {
             'loss_descs':self.lam_descs*self.loss_descs,
             'acc_coarse':self.acc_coarse,
-            'loss_coordinates':self.lam_coordinates*self.loss_coordinates,
-            'acc_coordinates':self.acc_coordinates,
             'loss_fb_descs':self.lam_fb_descs*self.loss_fb_descs,
             'acc_fb_coarse':self.acc_fb_coarse,
-            'loss_fb_coordinates':self.lam_fb_coordinates*self.loss_fb_coordinates,
-            'acc_fb_coordinates':self.acc_fb_coordinates,
             'loss_kpts':self.lam_kpts * self.loss_kpts,
             'acc_kpt':self.acc_kpt,
             'loss_normals':self.lam_normals * self.loss_normals,

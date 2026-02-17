@@ -244,8 +244,6 @@ def get_model_config(cfg):
             'ffn_type': cfg.MODEL.ATTENTION.AFT.FFN_TYPE,
         },
         'last_activation': cfg.MODEL.LAST_ACTIVATION,
-        'l2_normalization': bool(cfg.MODEL.L2_NORMALIZATION),
-        'use_coord_loss': bool(cfg.MODEL.USE_COORD_LOSS),
         'output_dim': int(cfg.MODEL.OUTPUT_DIM),
     }
 
