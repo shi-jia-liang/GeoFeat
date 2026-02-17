@@ -70,7 +70,7 @@ cfg.MODEL.ATTENTION_FFN_TYPE = "positionwiseFFN" 	# "positionwiseFFN" or "swiglu
 # Refiner options: "None", "Local", "Geometric"
 # "Local" uses simple depthwise separable conv
 # "Geometric" uses geometry-guided refinement (Requires geometric features)
-cfg.MODEL.REFINER_TYPE = "None"
+cfg.MODEL.REFINER_TYPE = "Geometric"
 
 cfg.MODEL.LAST_ACTIVATION = "sigmoid"
 

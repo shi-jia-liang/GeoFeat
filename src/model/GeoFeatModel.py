@@ -646,9 +646,9 @@ class GeometricLocalRefiner(nn.Module):
 		super().__init__()
 		# Reduce geometric guidance to a single spatial attention map or bias
 		self.geo_guide = nn.Sequential(
-			nn.Conv2d(geo_dim, dim // 4, kernel_size=1),
+			nn.Conv2d(geo_dim, dim, kernel_size=1),
 			nn.ReLU(inplace=True),
-			nn.Conv2d(dim // 4, dim, kernel_size=k, padding=k//2, groups=dim), # Depthwise
+			nn.Conv2d(dim, dim, kernel_size=k, padding=k//2, groups=dim), # Depthwise
 			nn.Sigmoid()
 		)
 		
@@ -799,10 +799,11 @@ class FeatureBooster(nn.Module):
 		elif self.refiner_type == 'Geometric':
 			# Calculate total geometric channels for the guide
 			total_geo_channels = 0
-			if model_config['geometric_features']['depth']: total_geo_channels += model_config['depth_dim']
-			if model_config['geometric_features']['normal']: total_geo_channels += model_config['normal_dim']
-			if model_config['geometric_features']['gradients']: total_geo_channels += model_config['gradient_dim']
-			if model_config['geometric_features']['curvatures']: total_geo_channels += model_config['curvature_dim']
+			# Use raw dims for the Conv2d input in GeometricLocalRefiner, not the encoded dims
+			if model_config['geometric_features']['depth']: total_geo_channels += 1
+			if model_config['geometric_features']['normal']: total_geo_channels += 3
+			if model_config['geometric_features']['gradients']: total_geo_channels += 2
+			if model_config['geometric_features']['curvatures']: total_geo_channels += 5
 			
 			self.refiner = GeometricLocalRefiner(dim=self.model_config['descriptor_dim'], geo_dim=total_geo_channels)
 		else:

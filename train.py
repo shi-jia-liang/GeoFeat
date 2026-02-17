@@ -18,9 +18,6 @@ def parse_arguments():
 	parser = argparse.ArgumentParser(description="GeoFeat training script.")
 	parser.add_argument('--name', type=str, default='GeoFeat', help='set process name')
 
-	# Dataset settings are now loaded from config files
-	# MegaDepth and COCO parameters are read from src/config/data/data_config.json
-
 	# training setting
 	# 保存权重
 	parser.add_argument('--ckpt_save_path', type=str, default='weights_win',
@@ -89,7 +86,7 @@ import setproctitle
 
 class Trainer():
 	def __init__(self, 
-				  data_config, model_config,
+				data_config, model_config,
 				model_name='GeoFeat',
 				ckpt_save_path="./weights",
 				n_steps=30_000,
@@ -177,6 +174,8 @@ class Trainer():
 		if self.use_megadepth:
 			TRAIN_BASE_PATH = f"{megadepth_root_path}/megadepth_indices"
 			TRAINVAL_DATA_SOURCE = f"{megadepth_root_path}/MegaDepth_v1"
+			# Adapting to local deeply nested structure
+			# TRAINVAL_DATA_SOURCE = f"{megadepth_root_path}/MegaDepth_v1/phoenix/S6/zl548/MegaDepth_v1"
 
 			TRAIN_NPZ_ROOT = f"{TRAIN_BASE_PATH}/scene_info_0.1_0.7"
 
@@ -225,23 +224,25 @@ class Trainer():
 		# 清理旧的训练目录
 		self._cleanup_old_runs(ckpt_save_path, model_name, max_runs=max_runs)
 
-		self.dry_run = dry_run
-		self.save_ckpt_every = save_ckpt_every
-		self.ckpt_save_path = ckpt_save_path
-		self.writer = SummaryWriter(logdir)
 		self.model_name = model_name
+		self.ckpt_save_path = ckpt_save_path
+		self.save_ckpt_every = save_ckpt_every
+		self.dry_run = dry_run
+		self.writer = SummaryWriter(logdir)
 		
 		# status 相关初始化
-		self._status_every = max(1, status_interval if status_interval > 0 else log_interval)
+		self.status_every = status_interval if status_interval > 0 else log_interval
 		self.status_path = os.path.join(self.run_dir, 'status.txt')
 		
 		# 初始化status文件
 		try:
 			with open(self.status_path, 'w', encoding='utf-8') as f:
-				# extended status (detailed loss/acc columns)
-				f.write('step,loss,loss_fb_descs,loss_kpts,loss_normals,loss_depths,loss_gradients,loss_curvature,'
-						'acc_coarse,acc_fb_coarse,acc_kpt,'
-						'total_pos,lr,forward_cost,skipped\n')
+				f.write('global_step,loss,' \
+						'loss_descs,acc_coarse,' \
+						'loss_fb_descs,acc_fb_coarse,' \
+						'loss_kpts,' \
+						'loss_depths,loss_normals,loss_gradients,loss_curvature,loss_deep_supervision,' \
+						'total_pos,lr,forward_cost\n')
 			print(f"Status file initialized: {self.status_path}")
 		except Exception as e:
 			print(f"Warning: Failed to initialize status file: {e}")
@@ -313,6 +314,7 @@ class Trainer():
 	# 神经网络训练
 	def train(self):
 		self.net.train()
+		best_acc = 0.0
 
 		with tqdm.tqdm(total=self.steps) as pbar:
 			for i in range(self.steps):
@@ -356,7 +358,7 @@ class Trainer():
 					fb_feat1=self.net.forward2(des_feats1[b].unsqueeze(0),geo_feats1[b].unsqueeze(0),keypoint_map1[b].unsqueeze(0))
 					fb_feat2=self.net.forward2(des_feats2[b].unsqueeze(0),geo_feats2[b].unsqueeze(0),keypoint_map2[b].unsqueeze(0))
 					
-					fb_feats1.append(fb_feat1.unsqueeze(0));fb_feats2.append(fb_feat2.unsqueeze(0))
+					fb_feats1.append(fb_feat1);fb_feats2.append(fb_feat2)
 					
 					img1,img2=imgs1_t[b],imgs2_t[b]
 					img1=img1.permute(1,2,0).expand(-1,-1,3).cpu().numpy() * 255
@@ -445,18 +447,22 @@ class Trainer():
 					ckpt_path = os.path.join(self.ckpt_dir, f'{self.model_name}_step{global_step}.pth')
 					torch.save(self.net.state_dict(), ckpt_path)
 				
+				# 保存最佳权重文件
+				if acc_coarse > best_acc:
+					best_acc = acc_coarse
+					best_ckpt_path = os.path.join(self.ckpt_dir, f'{self.model_name}_best.pth')
+					torch.save(self.net.state_dict(), best_ckpt_path)
+
 				# 打印训练过程(损失函数)
 				pbar.set_description(
 						'loss: {:.4f} '
 						'loss_descs: {:.3f} acc_coarse: {:.3f} '
 						'loss_fb_descs: {:.3f} acc_fb_coarse: {:.3f} '
-						'loss_kpts: {:.3f} acc_kpts: {:.3f} '
-						'loss_normals: {:.3f} loss_depths: {:.3f} loss_gradients: {:.3f} loss_curvature: {:.3f} loss_ds: {:.3f}'.format(
+						'loss_kpts: {:.3f} acc_kpts: {:.3f} '.format(
 						loss.item(),
 						loss_descs.item(), acc_coarse,
 						loss_fb_descs.item(), acc_fb_coarse,
 						loss_kpts.item(), acc_kpt,
-						loss_normals.item(), loss_depths.item(), loss_gradients.item(), loss_curvature.item(), loss_deep_supervision.item()
 					)
 				)
 				pbar.update(1)
@@ -465,31 +471,31 @@ class Trainer():
 				# pbar.update(1)：进度条前进 1 步
 				# pbar.update(5)：进度条前进 5 步
 				# 它不会影响你的训练逻辑，只是显示上的变化。
-				# 
+
 				# Log metrics
 				# log文件
 				self.writer.add_scalar('Loss/total', loss.item(), global_step)
-				self.writer.add_scalar('Accuracy/acc_coarse', acc_coarse, global_step)
-				self.writer.add_scalar('Accuracy/acc_fb_coarse', acc_fb_coarse, global_step)
 				self.writer.add_scalar('Loss/descs', loss_descs.item(), global_step)
+				self.writer.add_scalar('Accuracy/acc_coarse', acc_coarse, global_step)
 				self.writer.add_scalar('Loss/fb_descs', loss_fb_descs.item(), global_step)
+				self.writer.add_scalar('Accuracy/acc_fb_coarse', acc_fb_coarse, global_step)
 				self.writer.add_scalar('Loss/kpts', loss_kpts.item(), global_step)
-				self.writer.add_scalar('Loss/normals', loss_normals.item(), global_step)
 				self.writer.add_scalar('Loss/depths', loss_depths.item(), global_step)
+				self.writer.add_scalar('Loss/normals', loss_normals.item(), global_step)
 				self.writer.add_scalar('Loss/gradients', loss_gradients.item(), global_step)
 				self.writer.add_scalar('Loss/curvature', loss_curvature.item(), global_step)
 				self.writer.add_scalar('Loss/deep_supervision', loss_deep_supervision.item(), global_step)
 				
 				# status.txt 写入
-				if global_step % self._status_every == 0:
-					try:
-						total_pos = sum(len(p) for p in positives_coarse)
-						with open(self.status_path, 'a', encoding='utf-8') as f:
-							f.write(f"{global_step},{loss.item():.6f},{loss_fb_descs.item():.6f},{loss_kpts.item():.6f},{loss_normals.item():.6f},{loss_depths.item():.6f},{loss_gradients.item():.6f},{loss_curvature.item():.6f},"
-									f"{acc_coarse:.4f},{acc_fb_coarse:.4f},{acc_kpt:.4f},"
-									f"{total_pos},{self.opt.param_groups[0]['lr']:.6e},{end-start:.3f}\n")
-					except Exception as e:
-						print(f"Warning: Failed to write status: {e}")
+				if global_step % self.status_every == 0:
+					total_pos = sum(len(p) for p in positives_coarse)
+					with open(self.status_path, 'a', encoding='utf-8') as f:
+						f.write(f"{global_step},{loss.item():.6f},"
+			  					f"{loss_descs.item():.6f},{acc_coarse:.4f},"
+								f"{loss_fb_descs.item():.6f},{acc_fb_coarse:.4f},"
+								f"{loss_kpts.item():.6f},"
+								f"{loss_depths.item():.6f},{loss_normals.item():.6f},{loss_gradients.item():.6f},{loss_curvature.item():.6f},{loss_deep_supervision.item():.6f},"
+								f"{total_pos},{self.opt.param_groups[0]['lr']:.6e},{end-start:.3f}\n")
 
 
 if __name__ == '__main__':
@@ -506,10 +512,24 @@ if __name__ == '__main__':
 		'coco_root_path': cfg.DATASET.COCO_ROOT_PATH,
 		'coco_batch_size': int(cfg.DATASET.COCO_BATCH_SIZE),
 	}
+	
+	# Abort if all datasets are disabled
+	if not data_config['use_megadepth'] and not data_config['use_coco']:
+		print("Error: Both use_megadepth and use_coco are False. Enable at least one dataset to train.")
+		sys.exit(1)
+
+	# Abort if required dataset paths are missing when enabled
+	if data_config['use_megadepth'] and not data_config['megadepth_root_path']:
+		print("Error: MEGADEPTH_ROOT_PATH is empty in config.py while use_megadepth is True. Abort training.")
+		sys.exit(1)
+	if data_config['use_coco'] and not data_config['coco_root_path']:
+		print("Error: COCO_ROOT_PATH is empty in config.py while use_coco is True. Abort training.")
+		sys.exit(1)
+
 
 	model_config = {
-		"backbone": cfg.MODEL.BACKBONE,								# 骨干网络
-		"upsample_type": cfg.MODEL.UPSAMPLE_TYPE,					# 上采样类型
+		"backbone": cfg.MODEL.BACKBONE,									# 骨干网络
+		"upsample_type": cfg.MODEL.UPSAMPLE_TYPE,						# 上采样类型
 		# 关键点编码器
 		'keypoint_encoder': list(cfg.MODEL.KEYPOINT_ENCODER),			# 关键点编码器
 		'keypoint_dim': int(cfg.MODEL.KEYPOINT_DIM),					# 关键点维度
@@ -546,29 +566,16 @@ if __name__ == '__main__':
 		'output_dim': int(cfg.MODEL.OUTPUT_DIM),
 	}
 
-	# Abort if all datasets are disabled
-	if not data_config['use_megadepth'] and not data_config['use_coco']:
-		print("Error: Both use_megadepth and use_coco are False. Enable at least one dataset to train.")
-		sys.exit(1)
-
-	# Abort if required dataset paths are missing when enabled
-	if data_config['use_megadepth'] and not data_config['megadepth_root_path']:
-		print("Error: MEGADEPTH_ROOT_PATH is empty in config.py while use_megadepth is True. Abort training.")
-		sys.exit(1)
-	if data_config['use_coco'] and not data_config['coco_root_path']:
-		print("Error: COCO_ROOT_PATH is empty in config.py while use_coco is True. Abort training.")
-		sys.exit(1)
-
 	# GeoFeatModel will normalize key casing internally
 	if not model_config:
 		print("Error: MODEL section in config.py is empty. Abort training.")
 		sys.exit(1)
 
-	# Show loaded configs explicitly
-	print("data_config:")
-	print(json.dumps(data_config, indent=2))
-	print("model_config:")
-	print(json.dumps(model_config, indent=2))
+	# # Show loaded configs explicitly
+	# print("data_config:")
+	# print(json.dumps(data_config, indent=2))
+	# print("model_config:")
+	# print(json.dumps(model_config, indent=2))
 
 	trainer = Trainer(
 		# Configuration files
