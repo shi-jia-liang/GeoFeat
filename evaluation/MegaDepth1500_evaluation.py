@@ -1,172 +1,130 @@
 import os
 import sys
 import cv2
-from pathlib import Path
-import numpy as np
-import torch
-import torch.utils.data as data
-import tqdm
-from copy import deepcopy
-from torchvision.transforms import ToTensor
-import torch.nn.functional as F
 import json
-
-import scipy.io as scio
-import poselib
-
+import torch
+import numpy as np
 import argparse
-import datetime
+from tqdm import tqdm
 
 # Add project root to path
-sys.path.append(os.path.join(os.path.dirname(__file__),'../'))
-
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from src.utils.geofeat_wrapper import GeoFeat
 from src.config.config import get_cfg_defaults
-from evaluation.eval_utils import *
+from evaluation.eval_utils import compute_pose_error, compute_maa
 
-def get_model_config(cfg):
-    return {
-        'backbone': cfg.MODEL.BACKBONE,
-        'upsample_type': cfg.MODEL.UPSAMPLE_TYPE,
-        'pos_enc_type': cfg.MODEL.POS_ENC_TYPE,
-        'keypoint_encoder': list(cfg.MODEL.KEYPOINT_ENCODER),
-        'keypoint_dim': int(cfg.MODEL.KEYPOINT_DIM),
-        'descriptor_encoder': list(cfg.MODEL.DESCRIPTOR_ENCODER),
-        'descriptor_dim': int(cfg.MODEL.DESCRIPTOR_DIM),
-        'geometric_features': {
-            'depth': bool(cfg.MODEL.GEOMETRIC_FEATURES.DEPTH),
-            'normal': bool(cfg.MODEL.GEOMETRIC_FEATURES.NORMAL),
-            'gradients': bool(cfg.MODEL.GEOMETRIC_FEATURES.GRADIENTS),
-            'curvatures': bool(cfg.MODEL.GEOMETRIC_FEATURES.CURVATURES),
-        },
-        'depth_encoder': list(cfg.MODEL.DEPTH_ENCODER),
-        'depth_dim': int(cfg.MODEL.DEPTH_DIM),
-        'normal_encoder': list(cfg.MODEL.NORMAL_ENCODER),
-        'normal_dim': int(cfg.MODEL.NORMAL_DIM),
-        'gradient_encoder': list(cfg.MODEL.GRADIENT_ENCODER),
-        'gradient_dim': int(cfg.MODEL.GRADIENT_DIM),
-        'curvature_encoder': list(cfg.MODEL.CURVATURE_ENCODER),
-        'curvature_dim': int(cfg.MODEL.CURVATURE_DIM),
-        'Swin': {
-            'input_resolution': list(cfg.MODEL.SWIN.INPUT_RESOLUTION),
-            'depth_per_layer': int(cfg.MODEL.SWIN.DEPTH_PER_LAYER),
-            'num_heads': int(cfg.MODEL.SWIN.NUM_HEADS),
-            'window_size': int(cfg.MODEL.SWIN.WINDOW_SIZE),
-            'ffn_type': cfg.MODEL.ATTENTION.SWIN.FFN_TYPE,
-        },
-        'attention_layers': int(cfg.MODEL.ATTENTIONAL_LAYERS),
-        'AFT': {
-            'ffn_type': cfg.MODEL.ATTENTION.AFT.FFN_TYPE,
-        },
-        'last_activation': cfg.MODEL.LAST_ACTIVATION,
+# Configuration
+DATASET_ROOT = os.path.join(os.path.dirname(__file__), '../data/megadepth_test_1500')
+JSON_PATH = os.path.join(os.path.dirname(__file__), '../data/megadepth_1500.json')
 
-        'output_dim': int(cfg.MODEL.OUTPUT_DIM),
-    }
-
-from torch.utils.data import Dataset,DataLoader
-
-parser=argparse.ArgumentParser(description='MegaDepth dataset evaluation script')
-parser.add_argument('--name',type=str,default='GeoFeat',help='experiment name')
-parser.add_argument('--gpu',type=str,default='0',help='GPU ID')
-
-args=parser.parse_args()
-
-os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
-
-use_cuda = torch.cuda.is_available()
-device = "cuda" if use_cuda else "cpu"
-
-DATASET_ROOT = os.path.join(os.path.dirname(__file__),'../data/megadepth_test_1500')
-DATASET_JSON = os.path.join(os.path.dirname(__file__),'../data/megadepth_1500.json')
-
-class MegaDepth1500(Dataset):
-    """
-        Streamlined MegaDepth-1500 dataloader. The camera poses & metadata are stored in a formatted json for facilitating 
-        the download of the dataset and to keep the setup as simple as possible.
-    """
-    def __init__(self, json_file, root_dir):
-        # Load the info & calibration from the JSON
-        with open(json_file, 'r') as f:
+class MegaDepthDataset:
+    def __init__(self, json_path, root_dir):
+        print(f"Loading dataset index from {json_path}...")
+        with open(json_path, 'r') as f:
             self.data = json.load(f)
-
         self.root_dir = root_dir
-
-        if not os.path.exists(self.root_dir):
-            raise RuntimeError(
-            f"Dataset {self.root_dir} does not exist! \n \
-              > If you didn't download the dataset, use the downloader tool: python3 -m modules.dataset.download -h")
+        
+        if not os.path.exists(root_dir):
+            raise FileNotFoundError(f"MegaDepth images not found at {root_dir}")
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
-        data = deepcopy(self.data[idx])
-
-        h1, w1 = data['size0_hw']
-        h2, w2 = data['size1_hw']
-
-        # Here we resize the images to max_dim = 1200, as described in the paper, and adjust the image such that it is divisible by 32
-        # following the protocol of the LoFTR's Dataloader (intrinsics are corrected accordingly). 
-        # For adapting this with different resolution, you would need to re-scale intrinsics below.
-        image0_path = os.path.join(self.root_dir, data['pair_names'][0])
-        image1_path = os.path.join(self.root_dir, data['pair_names'][1])
+        # Shallow copy is fine as we only read/replace images
+        item = self.data[idx].copy()
         
-        if not os.path.exists(image0_path):
-            print(f"Warning: Image not found {image0_path}")
-        if not os.path.exists(image1_path):
-            print(f"Warning: Image not found {image1_path}")
+        # Paths
+        p1 = os.path.join(self.root_dir, item['pair_names'][0])
+        p2 = os.path.join(self.root_dir, item['pair_names'][1])
 
-        image0 = cv2.resize(cv2.imread(image0_path),(w1, h1))
-        image1 = cv2.resize(cv2.imread(image1_path),(w2, h2))
+        # Load images
+        # We assume dataset integrity. If files are missing, let cv2/os error out naturally or return None.
+        img1 = cv2.imread(p1)
+        img2 = cv2.imread(p2)
+        
+        if img1 is None: raise ValueError(f"Failed to read image: {p1}")
+        if img2 is None: raise ValueError(f"Failed to read image: {p2}")
 
-        # GeoFeat wrapper expects numpy array or tensor. 
-        # compute_pose_error in eval_utils expects tensor and converts to BGR numpy.
-        # We follow the pattern from the original script.
-        data['image0'] = torch.tensor(image0.astype(np.float32)/255).permute(2,0,1)
-        data['image1'] = torch.tensor(image1.astype(np.float32)/255).permute(2,0,1)
+        # Resize to specs in validatation set
+        h1, w1 = item['size0_hw']
+        h2, w2 = item['size1_hw']
+        
+        img1 = cv2.resize(img1, (w1, h1))
+        img2 = cv2.resize(img2, (w2, h2))
 
-        for k,v in data.items():
-            if k not in ('dataset_name', 'scene_id', 'pair_id', 'pair_names', 'size0_hw', 'size1_hw', 'image0', 'image1'):
-                data[k] = torch.tensor(np.array(v, dtype=np.float32))
-
-        return data
+        # Add images to item dict (as numpy arrays, handled by updated eval_utils.tensor2bgr)
+        item['image0'] = img1
+        item['image1'] = img2
+        
+        # Ensure matrix types are correct for computation
+        item['K0'] = np.array(item['K0'], dtype=np.float32)
+        item['K1'] = np.array(item['K1'], dtype=np.float32)
+        item['T_0to1'] = np.array(item['T_0to1'], dtype=np.float32)
+        
+        return item
 
 if __name__ == "__main__":
-    weights = os.path.join(os.path.dirname(__file__), '../weights_win/FSR_20260205_035106/FSR_step10000.pth')
+    parser = argparse.ArgumentParser(description='Simplified MegaDepth Evaluation')
+    parser.add_argument('--gpu', type=str, default='0')
+    parser.add_argument('--weights', type=str, required=True, help='Path to model weights')
+    args = parser.parse_args()
+
+    os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
+
+    # 1. Load Configuration
+    weights_path = os.path.abspath(args.weights)
+    snapshot_path = os.path.join(os.path.dirname(weights_path), 'config_snapshot.json')
     
-    print(f"Loading weights from {weights}")
+    if not os.path.exists(snapshot_path):
+        raise FileNotFoundError(f"Critical: No config_snapshot.json found at {snapshot_path}")
 
-    # Load config from snapshot if available for consistency
-    weights_dir = os.path.dirname(weights)
-    snapshot_path = os.path.join(weights_dir, 'config_snapshot.json')
-    if os.path.exists(snapshot_path):
-        print(f"Loading config from snapshot: {snapshot_path}")
-        with open(snapshot_path, 'r') as f:
-            model_config = json.load(f)['model_config']
-    else:
-        print("Snapshot not found, using default config")
-        model_config = get_model_config(get_cfg_defaults())
+    print(f"Loading config from: {snapshot_path}")
+    with open(snapshot_path, 'r') as f:
+        data = json.load(f)
+        # Handle cases where snapshot wraps config in 'model_config' or is flat
+        model_config = data.get('model_config', data)
 
-    geofeat = GeoFeat(model_config=model_config, weight_path=weights)
+    # 2. Initialize Model
+    print(f"Loading weights from: {weights_path}")
+    model = GeoFeat(model_config=model_config, weight_path=weights_path)
+
+    # 3. Prepare Data
+    try:
+        dataset = MegaDepthDataset(JSON_PATH, DATASET_ROOT)
+    except Exception as e:
+        print(f"Error initializing dataset: {e}")
+        sys.exit(1)
+        
+    results = []
+
+    print(f"Starting evaluation on {len(dataset)} pairs...")
     
-    dataset = MegaDepth1500(json_file = DATASET_JSON, root_dir = DATASET_ROOT)
+    # 4. Main Loop
+    for i in tqdm(range(len(dataset))):
+        data_item = dataset[i]
+        
+        try:
+            # Match & Estimate Pose
+            error_info = compute_pose_error(
+                match_fn=model.match_featnet,
+                data=data_item
+            )
+            results.append(error_info)
+        except Exception as e:
+            tqdm.write(f"Error processing pair {i}: {e}")
+            # Continue to next pair to get partial results if one fails
+            continue
 
-    loader = DataLoader(dataset, batch_size=1, shuffle=False)
-
-    metrics = {}
-    R_errs = []
-    t_errs = []
-    inliers = []
+    # 5. Report Metrics
+    if not results:
+        print("No results collected.")
+        sys.exit(0)
+        
+    auc_dict, _ = compute_maa(results)
     
-    results=[]
-
-    cur_time = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-
-    for d in tqdm.tqdm(loader, desc="processing"):
-        error_infos = compute_pose_error(geofeat.match_featnet, d)
-        results.append(error_infos)
-
-    print(f'\n==={cur_time}==={args.name}===')
-    d_err_auc,errors=compute_maa(results)
-    for s_k,s_v in d_err_auc.items():
-        print(f'{s_k}: {s_v*100:.3f}')
+    print(f"\n{'='*20} Results: {os.path.basename(weights_path)} {'='*20}")
+    print(f"AUC@5:  {auc_dict.get('auc@5', 0)*100:.2f}%")
+    print(f"AUC@10: {auc_dict.get('auc@10', 0)*100:.2f}%")
+    print(f"AUC@20: {auc_dict.get('auc@20', 0)*100:.2f}%")
+    print("=" * 60)

@@ -156,8 +156,8 @@ class GeoFeat:
 		descs_map, geo_feats, kpt_logits = self.net.forward1(image)
 		descs_refined = self.net.forward2(descs_map, geo_feats, kpt_logits)
 
-		descs_map = descs_refined.reshape(descs_map.shape[0], descs_map.shape[2], descs_map.shape[3], -1).permute(0, 3, 1, 2)
-		descs_map = F.normalize(descs_map, p=2, dim=1)
+		# GeoFeatModel already returns [B, C, H, W], no need to reshape/permute like LiftFeat
+		descs_map = F.normalize(descs_refined, p=2, dim=1)
 
 		scores = F.softmax(kpt_logits, dim=1)[:, :64]
 		heatmap = scores.permute(0, 2, 3, 1).reshape(scores.shape[0], scores.shape[2], scores.shape[3], 8, 8)
@@ -176,6 +176,8 @@ class GeoFeat:
 			return {"descriptors": empty_desc, "keypoints": kpts, "scores": empty_scores}
 
 		scores = self.sampler(heatmap, kpts.unsqueeze(0), _H, _W).squeeze(0).reshape(-1)
+		
+		# Standard normalization: dim=1 corresponds to Channels for [N, C] tensor
 		descs = self.sampler(descs_map, kpts.unsqueeze(0), _H, _W).squeeze(0)
 		descs = F.normalize(descs, p=2, dim=1)
 

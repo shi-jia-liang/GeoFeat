@@ -428,9 +428,8 @@ class GeoHead(nn.Module):
 		x3 = torch.cat([x2_0,x3],dim=1)
 		x = self.leaky_relu(self.bnDepc(self.convDepc(x3)))
 		
-		x = F.normalize(x,p=2,dim=1)
-		return x
-																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																   
+		# x = F.normalize(x,p=2,dim=1)  # Remove normalization to keep physical meaning of geometric features
+		return x																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																																								   
 
 # --------- Encoder Classes ---------
 def MLP(channels: List[int], do_bn: bool = False) -> nn.Module:
@@ -639,20 +638,22 @@ class LocalRefiner(nn.Module):
 # 增强版本的局部细化模块，加入几何引导
 class GeometricLocalRefiner(nn.Module):
 	"""
-	[Module 3] Geometric-Guided Local Refinement Module.
-	Sharpen features using depth/normal edges to fix 'bleeding' artifacts in large viewpoint changes.
+	[Module 3] Geometric-Guided Local Refinement Module (Lightweight Version).
+	Uses a single-channel spatial gate derived from geometry to prevent feature bleeding.
+	Design for Real-Time Performance: Minimal extra FLOPs.
 	"""
 	def __init__(self, dim, geo_dim, k=3):
 		super().__init__()
-		# Reduce geometric guidance to a single spatial attention map or bias
+		# Lightweight Guide Head: geo_dim -> 8 -> 1
+		# Drastically reduces parameters compared to mapping to 'dim' (e.g. 128)
 		self.geo_guide = nn.Sequential(
-			nn.Conv2d(geo_dim, dim, kernel_size=1),
+			nn.Conv2d(geo_dim, 8, kernel_size=1),   # Compress geometric info
 			nn.ReLU(inplace=True),
-			nn.Conv2d(dim, dim, kernel_size=k, padding=k//2, groups=dim), # Depthwise
-			nn.Sigmoid()
+			nn.Conv2d(8, 1, kernel_size=k, padding=k//2), # Generate Spatial Mask
+			nn.Sigmoid()                            # 0=Block (Edge), 1=Pass (Flat)
 		)
 		
-		# Depthwise Separable Convolution for refinement
+		# Standard Depthwise Separable Conv (Very fast)
 		self.dw = nn.Conv2d(dim, dim, kernel_size=k, stride=1, padding=k//2, groups=dim)
 		self.pw = nn.Conv2d(dim, dim, kernel_size=1)
 		self.act = nn.GELU()
@@ -665,17 +666,18 @@ class GeometricLocalRefiner(nn.Module):
 		
 		residual = x
 		
-		# 1. Generate geometric guidance (e.g. edge attention)
-		guidance = self.geo_guide(geo_map)
+		# 1. Generate Gate (B, 1, H, W) - Computationally negligible
+		gate = self.geo_guide(geo_map)
 		
-		# 2. Guided Depthwise Convolution
-		# Inject geometric structure into the convolution
-		x = self.dw(x * guidance) 
+		# 2. Gated Convolution
+		# "x * gate" applies the geometric constraint.
+		# If gate is 0 (edge), the convolution sees 0s, effectively stopping propagation over the edge.
+		x = self.dw(x * gate) 
 		
 		# 3. Pointwise & Activation
-		x = x.permute(0, 2, 3, 1) # (B, H, W, C)
+		x = x.permute(0, 2, 3, 1) # NHWC
 		x = self.norm(x)
-		x = x.permute(0, 3, 1, 2)
+		x = x.permute(0, 3, 1, 2) # NCHW
 		
 		x = self.act(x)
 		x = self.pw(x)

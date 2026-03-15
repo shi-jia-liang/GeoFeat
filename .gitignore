@@ -7,11 +7,14 @@ datasets/
 data/
 
 # logs file
-logs/
+logdir/
 
 # weights file
 weights/*
 weights_win/*
+weights_0227/*
+weights_0308/*
+weights_0314/*
 
 # onnx models
 *.onnx

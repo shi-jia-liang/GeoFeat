@@ -139,7 +139,6 @@ class GeoFeatLoss(nn.Module):
 				lam_depth=1,
 				lam_gradients=1,
 				lam_curvature=1,
-				lam_deep_supervision=1.0,
 				depth_spvs=True, 
 				geo_config=None):
 		super().__init__()
@@ -153,7 +152,6 @@ class GeoFeatLoss(nn.Module):
 		self.lam_depth=lam_depth                  # 深度估计损失权重
 		self.lam_gradients=lam_gradients          # 深度梯度损失权重
 		self.lam_curvature=lam_curvature          # 曲率一致性损失权重
-		self.lam_deep_supervision=lam_deep_supervision # 深度监督损失权重 (中间层监督)
 		self.depth_spvs=depth_spvs                # 是否启用深度监督
 		self.geo_config = geo_config if geo_config is not None else {}
 		
@@ -166,7 +164,6 @@ class GeoFeatLoss(nn.Module):
 		self.loss_depths=0          # 深度损失
 		self.loss_gradients=0       # 梯度损失
 		self.loss_curvature=0       # 曲率损失
-		self.loss_deep_supervision=0 # 深度监督损失
 		
 		# 当前批次精度指标
 		self.acc_coarse=0           # 粗匹配精度
@@ -572,102 +569,6 @@ class GeoFeatLoss(nn.Module):
 			
 		return loss_depth, loss_grad, loss_curv
 	
-	def compute_deep_supervision_loss(self, preds, DA_depths, DA_normals, batch_size):
-		"""
-		Deep Supervision Loss (深层监督损失)
-		
-		功能:
-			对模型中间层的特征输出进行监督（Supervised Learning）。
-			由于模型较深（Deep Network），早期层可能存在梯度消失或学习缓慢的问题。
-			通过在中间层引入辅助 Loss，迫使中间特征也具有一定的几何语义（Partial Geometric Understanding），
-			从而加速收敛并 regularize 模型。
-		
-		计算:
-			Loss = L1(Downsampled(D_pred), Downsampled(D_GT)) + Cosine(Downsampled(N_pred), Downsampled(N_GT))
-			
-			这一过程需要将 GT 根据中间特征图的分辨率进行下采样（Downsampling）。
-		"""
-		"""
-		Compute loss for intermediate predictions (pred_a, pred_b).
-		preds: (B, 4, H, W) tensor. Channel 0 is depth, 1-3 is normal.
-		DA_depths: List of GT depth maps (H_orig, W_orig)
-		DA_normals: List of GT normal maps (H_orig, W_orig, 3)
-		batch_size: Number of MegaDepth images to consider (at the end of the batch)
-		"""
-		if batch_size <= 0:
-			return torch.tensor(0.0, device=self.dev)
-
-		loss_list = []
-		
-		# Slice predictions and GT
-		cur_preds = preds[-batch_size:]
-		
-		if len(DA_depths) > batch_size:
-			cur_DA_depths = DA_depths[-batch_size:]
-			cur_DA_normals = DA_normals[-batch_size:]
-		else:
-			cur_DA_depths = DA_depths
-			cur_DA_normals = DA_normals
-			
-		num_samples = min(len(cur_DA_depths), cur_preds.shape[0])
-		_, _, H_pred, W_pred = cur_preds.shape
-		
-		for b in range(num_samples):
-			# Prediction
-			pred_d = cur_preds[b, 0:1] # (1, H, W)
-			pred_n = cur_preds[b, 1:4] # (3, H, W)
-			
-			# Target Depth
-			tgt_d = cur_DA_depths[b]
-			if tgt_d.dim() == 2:
-				tgt_d = tgt_d.unsqueeze(0).unsqueeze(0) # (1, 1, H_orig, W_orig)
-			elif tgt_d.dim() == 3:
-				tgt_d = tgt_d.unsqueeze(0) # (1, 1, H_orig, W_orig)
-				
-			# Target Normal
-			tgt_n = cur_DA_normals[b] # (H_orig, W_orig, 3)
-			tgt_n = tgt_n.permute(2, 0, 1).unsqueeze(0) # (1, 3, H_orig, W_orig)
-			
-			# Downsample Targets
-			tgt_d_down = F.interpolate(tgt_d, size=(H_pred, W_pred), mode='bilinear', align_corners=False)
-			tgt_n_down = F.interpolate(tgt_n, size=(H_pred, W_pred), mode='bilinear', align_corners=False)
-			
-			# Normalize Normals after interpolation
-			tgt_n_down = F.normalize(tgt_n_down, p=2, dim=1)
-			
-			# Normalize Depths to 0-1 range using per-sample min-max
-			d_min = tgt_d_down.min()
-			d_max = tgt_d_down.max()
-			if d_max - d_min > 1e-6:
-				tgt_d_down = (tgt_d_down - d_min) / (d_max - d_min)
-			else:
-				tgt_d_down = torch.zeros_like(tgt_d_down)
-			
-			# Normalize Prediction Depth if needed (assuming prediction is raw output, but we want to match 0-1 target)
-			# Note: pred_d is from LeakyReLU, so it's >= 0. 
-			# If we assume the network learns to predict 0-1, we don't scale it.
-			# But if we assume it predicts 0-255, we should scale it.
-			# Given the main loss logic:
-			# if d_pred1.max() > 1.0: d_pred1 = d_pred1 / 255.0
-			# We should apply the same check.
-			if pred_d.max() > 1.0:
-				pred_d = pred_d / 255.0
-				
-			# Depth Loss (L1)
-			l_d = F.l1_loss(pred_d, tgt_d_down.squeeze(0))
-			
-			# Normal Loss (Cosine Similarity)
-			# Using the same logic as normal_loss function but adapted for downsampled tensors
-			# normal_loss expects (3, H, W) inputs
-			l_n = self.normal_loss(pred_n, tgt_n_down.squeeze(0))
-			
-			loss_list.append(l_d + l_n)
-			
-		if not loss_list:
-			return torch.tensor(0.0, device=self.dev)
-			
-		return torch.stack(loss_list).mean()
-		
 	def forward(self,
 				descs1,fb_descs1,kpts1,normals1,
 				descs2,fb_descs2,kpts2,normals2,
@@ -693,28 +594,20 @@ class GeoFeatLoss(nn.Module):
 		# end=time.perf_counter()
 		# print(f"kpts loss cost {end-start} seconds")
 		
-		# Extract normals and depth from prediction (B, 4, H, W)
-		# Channel 0: Depth, Channel 1-3: Normal
-		if normals1.shape[1] == 4:
-			pred_depths1 = normals1[:, 0:1, :, :]
-			pred_normals1 = normals1[:, 1:4, :, :]
-			pred_depths2 = normals2[:, 0:1, :, :]
-			pred_normals2 = normals2[:, 1:4, :, :]
-		else:
-			# Fallback if model output changes
-			pred_depths1 = None
-			pred_normals1 = normals1
-			pred_depths2 = None
-			pred_normals2 = normals2
+		# Process geometry features
+		# We now use the split geo dictionaries instead of legacy normals1/normals2 arguments.
+		pred_normals1 = geo_features1.get('normal', normals1)
+		pred_normals2 = geo_features2.get('normal', normals2)
 
 		# start=time.perf_counter()
-		if self.geo_config.get('normal', True):
+		if self.geo_config.get('normal', True) and pred_normals1 is not None:
 			self.loss_normals=self.compute_normals_loss(pred_normals1,pred_normals2,DA_normals1,DA_normals2,megadepth_batch_size,coco_batch_size)
 		else:
 			self.loss_normals = torch.tensor(0.0, device=self.dev)
 		# self.loss_normals = self.compute_normals_loss(normals1, normals2, DA_normals1, DA_normals2,coco_batch_size)
 		# end=time.perf_counter()
 		# print(f"normal loss cost {end-start} seconds")
+
 		
 		if self.lam_depth > 0 or self.lam_gradients > 0 or self.lam_curvature > 0:
 			self.loss_depths, self.loss_gradients, self.loss_curvature = self.compute_geometric_loss(geo_features1, geo_features2, DA_depths1, DA_depths2, megadepth_batch_size)
@@ -722,34 +615,6 @@ class GeoFeatLoss(nn.Module):
 			self.loss_depths = torch.tensor(0.0, device=self.dev)
 			self.loss_gradients = torch.tensor(0.0, device=self.dev)
 			self.loss_curvature = torch.tensor(0.0, device=self.dev)
-
-		# Deep Supervision Loss
-		loss_ds_a = torch.tensor(0.0, device=self.dev)
-		loss_ds_b = torch.tensor(0.0, device=self.dev)
-		
-		if self.lam_deep_supervision > 0 and megadepth_batch_size > 0:
-			# Check for pred_a and pred_b in geo_features
-			# We combine predictions from both images (1 and 2)
-			
-			# Image 1
-			if 'pred_a' in geo_features1:
-				loss_ds_a += self.compute_deep_supervision_loss(geo_features1['pred_a'], DA_depths1, DA_normals1, megadepth_batch_size)
-			if 'pred_b' in geo_features1:
-				loss_ds_b += self.compute_deep_supervision_loss(geo_features1['pred_b'], DA_depths1, DA_normals1, megadepth_batch_size)
-				
-			# Image 2
-			if 'pred_a' in geo_features2:
-				loss_ds_a += self.compute_deep_supervision_loss(geo_features2['pred_a'], DA_depths2, DA_normals2, megadepth_batch_size)
-			if 'pred_b' in geo_features2:
-				loss_ds_b += self.compute_deep_supervision_loss(geo_features2['pred_b'], DA_depths2, DA_normals2, megadepth_batch_size)
-				
-			# Average over images if both contributed
-			if 'pred_a' in geo_features1 and 'pred_a' in geo_features2:
-				loss_ds_a /= 2
-			if 'pred_b' in geo_features1 and 'pred_b' in geo_features2:
-				loss_ds_b /= 2
-				
-		self.loss_deep_supervision = loss_ds_a + loss_ds_b
 		
 		return {
 			'loss_descs':self.lam_descs*self.loss_descs,
@@ -763,6 +628,5 @@ class GeoFeatLoss(nn.Module):
 			'loss_depths': self.lam_depth * self.loss_depths,
 			'loss_gradients': self.lam_gradients * self.loss_gradients,
 			'loss_curvature': self.lam_curvature * self.loss_curvature,
-			'loss_deep_supervision': self.lam_deep_supervision * self.loss_deep_supervision
 		}
 

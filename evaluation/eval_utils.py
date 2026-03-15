@@ -49,29 +49,44 @@ def estimate_pose(kpts0, kpts1, K0, K1, thresh, conf=0.99999):
     return ret
 
 def tensor2bgr(t):
-    """将 tensor (C, H, W) 转换为 BGR 图像 (H, W, 3)"""
-    # 处理可能是稀疏张量的情况
-    if t.is_sparse:
-        t = t.coalesce().to_dense()
+    """
+    Robust conversion to BGR numpy uint8 image.
+    Handles:
+    - Tensor (C, H, W) float [0,1] or uint8 [0,255]
+    - Numpy (H, W, C) float [0,1] or uint8 [0,255]
+    - Numpy (H, W) grayscale
+    """
+    # 1. Unpack if needed
+    if isinstance(t, torch.Tensor):
+        if t.is_sparse: t = t.coalesce().to_dense()
+        t = t.detach().cpu()
+        
+        if t.dim() == 4: t = t[0]  # Remove batch
+        
+        if t.dim() == 3 and t.shape[0] in [1, 3]:
+            # (C, H, W) -> (H, W, C)
+            t = t.permute(1, 2, 0).numpy()
+        elif t.dim() == 2:
+            t = t.numpy()
+        else:
+            t = t.numpy() # Fallback
+            
+    # 2. Convert to Numpy uint8 BGR
+    img = np.array(t)
     
-    # 确保是密集张量
-    if not isinstance(t, torch.Tensor) or t.is_sparse:
-        t = torch.tensor(t)
-    
-    # 取第一个 batch（如果有）或直接使用
-    if t.dim() == 4:
-        t = t[0]  # 移除 batch 维度
-    elif t.dim() == 2:
-        # 如果是 (H, W) 格式，假设是灰度图
-        t = t.unsqueeze(0).repeat(3, 1, 1)  # 转换为 (3, H, W)
-    
-    # 执行 permute 操作
-    if t.dim() == 3:
-        result = t.permute(1, 2, 0).cpu().numpy()
-    else:
-        result = t.cpu().numpy()
-    
-    return (result * 255).astype(np.uint8)
+    # Check if we need to scale from 0-1 to 0-255
+    if img.dtype != np.uint8:
+        if img.max() <= 1.1:
+            img = (img * 255).clip(0, 255)
+        img = img.astype(np.uint8)
+
+    # 3. Ensure 3 channels
+    if img.ndim == 2:
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    elif img.ndim == 3 and img.shape[2] == 1:
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        
+    return img
 
 def compute_pose_error(match_fn,data):
     result = {}

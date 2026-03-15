@@ -241,7 +241,7 @@ class Trainer():
 						'loss_descs,acc_coarse,' \
 						'loss_fb_descs,acc_fb_coarse,' \
 						'loss_kpts,' \
-						'loss_depths,loss_normals,loss_gradients,loss_curvature,loss_deep_supervision,' \
+						'loss_depths,loss_normals,loss_gradients,loss_curvature,' \
 						'total_pos,lr,forward_cost\n')
 			print(f"Status file initialized: {self.status_path}")
 		except Exception as e:
@@ -409,12 +409,10 @@ class Trainer():
 				loss_normals = loss_info['loss_normals']
 				loss_gradients = loss_info['loss_gradients']
 				loss_curvature = loss_info['loss_curvature']
-				loss_deep_supervision = loss_info['loss_deep_supervision']
 				
 				loss_items.append(loss_descs.unsqueeze(0))      # 描述子损失
-				loss_items.append(loss_fb_descs.unsqueeze(0))   # [修复] 增强描述子损失
+				loss_items.append(loss_fb_descs.unsqueeze(0))   # 增强描述子损失
 				loss_items.append(loss_kpts.unsqueeze(0))       # 关键点损失
-				loss_items.append(loss_deep_supervision.unsqueeze(0)) # [修复] 深层监督损失
 				
 				# Add geometric losses if enabled
 				geo_config = self.model_config.get('geometric_features', {})
@@ -484,17 +482,16 @@ class Trainer():
 				self.writer.add_scalar('Loss/normals', loss_normals.item(), global_step)
 				self.writer.add_scalar('Loss/gradients', loss_gradients.item(), global_step)
 				self.writer.add_scalar('Loss/curvature', loss_curvature.item(), global_step)
-				self.writer.add_scalar('Loss/deep_supervision', loss_deep_supervision.item(), global_step)
 				
 				# status.txt 写入
 				if global_step % self.status_every == 0:
 					total_pos = sum(len(p) for p in positives_coarse)
 					with open(self.status_path, 'a', encoding='utf-8') as f:
 						f.write(f"{global_step},{loss.item():.6f},"
-			  					f"{loss_descs.item():.6f},{acc_coarse:.4f},"
+								f"{loss_descs.item():.6f},{acc_coarse:.4f},"
 								f"{loss_fb_descs.item():.6f},{acc_fb_coarse:.4f},"
 								f"{loss_kpts.item():.6f},"
-								f"{loss_depths.item():.6f},{loss_normals.item():.6f},{loss_gradients.item():.6f},{loss_curvature.item():.6f},{loss_deep_supervision.item():.6f},"
+								f"{loss_depths.item():.6f},{loss_normals.item():.6f},{loss_gradients.item():.6f},{loss_curvature.item():.6f},"
 								f"{total_pos},{self.opt.param_groups[0]['lr']:.6e},{end-start:.3f}\n")
 
 

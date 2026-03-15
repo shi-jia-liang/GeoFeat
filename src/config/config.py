@@ -32,10 +32,10 @@ cfg.MODEL.DESCRIPTOR_ENCODER = [64, 64]
 
 # Normal, Gradient, and Curvature feature encoders
 cfg.MODEL.GEOMETRIC_FEATURES = CN()
-cfg.MODEL.GEOMETRIC_FEATURES.DEPTH = False
+cfg.MODEL.GEOMETRIC_FEATURES.DEPTH = True
 cfg.MODEL.GEOMETRIC_FEATURES.NORMAL = True
-cfg.MODEL.GEOMETRIC_FEATURES.GRADIENTS = False
-cfg.MODEL.GEOMETRIC_FEATURES.CURVATURES = False
+cfg.MODEL.GEOMETRIC_FEATURES.GRADIENTS = True
+cfg.MODEL.GEOMETRIC_FEATURES.CURVATURES = True
 
 cfg.MODEL.DEPTH_ENCODER = [128, 64, 64]
 cfg.MODEL.DEPTH_DIM = 64
@@ -65,13 +65,14 @@ cfg.MODEL.CURVATURE_DIM = 320
 
 # Attention configuration
 cfg.MODEL.ATTENTIONAL_LAYERS = 3
-cfg.MODEL.ATTENTION_FFN_TYPE = "positionwiseFFN" 	# "positionwiseFFN" or "swigluFFN"
+cfg.MODEL.ATTENTION_FFN_TYPE = "positionwiseFFN"
 
 # Refiner options: "None", "Local", "Geometric"
 # "Local" uses simple depthwise separable conv
 # "Geometric" uses geometry-guided refinement (Requires geometric features)
-cfg.MODEL.REFINER_TYPE = "Geometric"
+cfg.MODEL.REFINER_TYPE = "None"
 
+# Final activation for descriptors: "None", "relu", "sigmoid", "tanh"
 cfg.MODEL.LAST_ACTIVATION = "sigmoid"
 
 cfg.MODEL.OUTPUT_DIM = 64
